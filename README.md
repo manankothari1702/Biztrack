@@ -31,7 +31,7 @@ Biztrack is a comprehensive business management dashboard designed for independe
 
 1. **Clone the repository:**
    ```bash
-   git clone <your-repo-url>
+   git clone https://github.com/mananmaheshwari1702/Biztrack.git
    cd Biztrack
    ```
 
