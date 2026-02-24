@@ -1,73 +1,79 @@
-# React + TypeScript + Vite
+# Biztrack
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Biztrack is a comprehensive business management dashboard designed for independent business owners, supervisors, and network marketers. It serves as a central hub for managing client relationships (CRM), tracking daily tasks, visualizing organizational structures, and scheduling follow-ups.
 
-Currently, two official plugins are available:
+## 🚀 Key Features
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+- **Client Management (CRM):** Maintain a detailed database of clients, manage follow-ups, and track call outcomes to prevent lost leads.
+- **Task Management:** Create, track, and manage priority tasks with a clear view of overdue, pending, and completed items.
+- **Team Visualization:** Dynamic, zoomable Organization Tree to easily manage and visualize your downline/team structure.
+- **Calendar & Scheduling:** Integrated calendar view to manage upcoming client calls and deadlines.
+- **Dashboard Overview:** Real-time metric cards for calls due, active tasks, and recent activity to keep you focused.
+- **Data Privacy & Security:** Secure authentication and data isolation per user using Firebase.
 
-## React Compiler
+## 🛠 Tech Stack
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+- **Frontend:** React 19, Vite, TypeScript
+- **Styling:** Tailwind CSS
+- **Routing:** React Router DOM
+- **Backend/Database:** Firebase (Authentication, Firestore)
+- **Icons:** FontAwesome
 
-## Expanding the ESLint configuration
+## 💻 Getting Started
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+### Prerequisites
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+- Node.js (v18 or higher recommended)
+- npm or yarn
+- Firebase Project setup
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
+### Installation
 
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+1. **Clone the repository:**
+   ```bash
+   git clone <your-repo-url>
+   cd Biztrack
+   ```
+
+2. **Install dependencies:**
+   ```bash
+   npm install
+   ```
+
+3. **Environment Setup:**
+   Create a `.env` file in the root directory based on `.env.example` and add your Firebase configuration details:
+   ```env
+   VITE_FIREBASE_API_KEY=your_api_key
+   VITE_FIREBASE_AUTH_DOMAIN=your_auth_domain
+   VITE_FIREBASE_PROJECT_ID=your_project_id
+   VITE_FIREBASE_STORAGE_BUCKET=your_storage_bucket
+   VITE_FIREBASE_MESSAGING_SENDER_ID=your_messaging_sender_id
+   VITE_FIREBASE_APP_ID=your_app_id
+   ```
+
+4. **Run the development server:**
+   ```bash
+   npm run dev
+   ```
+   The application will be available at `http://localhost:5173`.
+
+### Building for Production
+
+To create a production build:
+```bash
+npm run build
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
-
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+To preview the production build locally:
+```bash
+npm run preview
 ```
+
+## 📂 Project Structure
+
+- `src/components/`: Reusable UI components.
+- `src/pages/`: Main application pages and views.
+- `src/context/`: React context providers for global state management (Auth, Data).
+- `src/hooks/`: Custom React hooks.
+- `src/lib/`: Utility functions and Firebase configuration.
+- `src/types/`: TypeScript type definitions.
