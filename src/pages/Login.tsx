@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useNavigate } from 'react-router-dom';
 import { logger } from '../utils/logger';
@@ -17,6 +17,14 @@ const Login: React.FC = () => {
     const [loading, setLoading] = useState(false);
     const [resetSent, setResetSent] = useState(false);
 
+    useEffect(() => {
+        const blocked = sessionStorage.getItem('auth_blocked');
+        if (blocked === 'account_pending_deletion') {
+            setError('This account is pending deletion and cannot be accessed.');
+            sessionStorage.removeItem('auth_blocked');
+        }
+    }, []);
+
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         setError('');
@@ -25,6 +33,14 @@ const Login: React.FC = () => {
         try {
             const normalizedEmail = normalizeEmail(email);
             if (mode === 'signup') {
+                if (password.length < 8) {
+                    setError('Password must be at least 8 characters long.');
+                    return;
+                }
+                if (!/[A-Z]/.test(password) || !/[0-9]/.test(password)) {
+                    setError('Password must contain at least one uppercase letter and one number.');
+                    return;
+                }
                 await signup(normalizedEmail, password, name);
                 navigate('/');
             } else if (mode === 'login') {
@@ -44,8 +60,10 @@ const Login: React.FC = () => {
                 setError('User already exists. Please sign in');
             } else if (err.code === 'auth/too-many-requests') {
                 setError('Too many failed attempts. Please try again later.');
+            } else if (err.code === 'auth/network-request-failed') {
+                setError('Network error. Please check your connection and try again.');
             } else {
-                setError('Failed to process request: ' + err.message);
+                setError('Something went wrong. Please try again.');
             }
         } finally {
             if (mode !== 'forgot') setLoading(false);
@@ -56,11 +74,15 @@ const Login: React.FC = () => {
         setError('');
         setLoading(true);
         try {
-            await googleSignIn();
+            await googleSignIn(rememberMe);
             navigate('/');
         } catch (err: any) {
             logger.error(err);
-            setError('Failed to sign in with Google: ' + err.message);
+            if (err.code === 'auth/popup-closed-by-user' || err.code === 'auth/cancelled-popup-request') {
+                setError('Sign-in was cancelled.');
+            } else {
+                setError('Google sign-in failed. Please try again.');
+            }
             setLoading(false);
         }
     };

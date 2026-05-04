@@ -23,7 +23,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
             <main className={`
                 flex-1 md:ml-64 transition-all duration-300 w-full min-w-0
                 pt-20 md:pt-0
-                ${isCalendar ? 'p-0 px-0' : 'p-4 md:p-6 lg:p-8'}
+                ${isCalendar ? 'p-0 px-0' : 'p-3 md:p-6 lg:p-8'}
             `}>
                 <div className="w-full max-w-full mx-auto h-full flex flex-col">
                     {children}

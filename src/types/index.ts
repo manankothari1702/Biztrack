@@ -60,11 +60,16 @@ export interface Client {
   createdAt: string; // New ISO Date string
 }
 
-export interface OrgNode {
+// Flat shape stored in Firestore — no children array
+export interface FlatOrgNode {
   id: string;
   name: string;
   role: string;
   level: OrgLevel;
   parentId: string | null;
+}
+
+// In-memory tree shape built by buildOrgTree — never written to Firestore
+export interface OrgNode extends FlatOrgNode {
   children: OrgNode[];
 }

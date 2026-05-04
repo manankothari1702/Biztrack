@@ -1,13 +1,7 @@
-import type { OrgNode } from '../types';
+import type { FlatOrgNode, OrgNode } from '../types';
 import { logger } from './logger';
 
-/**
- * Reconstructs the tree structure from a flat array of nodes.
- * @param nodes Flat list of OrgNodes (children array might be empty or partial).
- * @param rootUserId The current user's ID, used to identify the root node if needed.
- * @returns The root OrgNode with its children populated recursively.
- */
-export const buildOrgTree = (nodes: OrgNode[]): OrgNode | null => {
+export const buildOrgTree = (nodes: FlatOrgNode[]): OrgNode | null => {
     if (!nodes || nodes.length === 0) return null;
 
     // Create a map for constant time lookup

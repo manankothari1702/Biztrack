@@ -45,11 +45,9 @@ exports.onUserStatusChanged = (0, firestore_1.onDocumentUpdated)({
     timeoutSeconds: 540,
     memory: "1GiB",
 }, async (event) => {
-    const snapshot = event.data;
-    if (!snapshot)
-        return;
-    const newData = snapshot.after.data();
-    const previousData = snapshot.before.data();
+    var _a, _b;
+    const newData = (_a = event.data) === null || _a === void 0 ? void 0 : _a.after.data();
+    const previousData = (_b = event.data) === null || _b === void 0 ? void 0 : _b.before.data();
     if (!newData || !previousData)
         return;
     // Only act when deletionRequested transitions from false → true
@@ -65,13 +63,13 @@ exports.onUserStatusChanged = (0, firestore_1.onDocumentUpdated)({
     }
     try {
         // 1. Mark as PROCESSING
-        await snapshot.after.ref.update({
+        await event.data.after.ref.update({
             deletionStatus: "PROCESSING",
             deletionStartedAt: admin.firestore.FieldValue.serverTimestamp(),
         });
-        // 2. Recursively delete all subcollections and the user document
+        // 2. Recursively delete all subcollections and documents
         firebase_functions_1.logger.info("Starting recursive delete", { uid: uid.slice(0, 8) });
-        await db.recursiveDelete(snapshot.after.ref);
+        await db.recursiveDelete(event.data.after.ref);
         // 3. Delete Firebase Auth user
         try {
             await auth.deleteUser(uid);
@@ -90,9 +88,9 @@ exports.onUserStatusChanged = (0, firestore_1.onDocumentUpdated)({
     catch (error) {
         firebase_functions_1.logger.error("Account deletion failed", { uid: uid.slice(0, 8), error: error.message });
         // Write failure state only if document still exists
-        const docSnap = await snapshot.after.ref.get();
+        const docSnap = await event.data.after.ref.get();
         if (docSnap.exists) {
-            await snapshot.after.ref.update({
+            await event.data.after.ref.update({
                 deletionStatus: "FAILED",
                 deletionError: error.message || "Unknown error",
             });

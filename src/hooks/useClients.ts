@@ -105,35 +105,33 @@ export const useClients = (
     const updateClient = useCallback(async (client: Client) => {
         if (!currentUser) return;
 
-        // Optimistic Update
-        const key = queryCache.generateKey('clients', currentUser.uid, { constraints: [filterType, searchQuery, sortBy], page: 'first' });
+        // Key must match what useFirestoreQuery stores: dependencies = [filterType, searchQuery, sortBy, page]
+        const key = queryCache.generateKey('clients', currentUser.uid, { constraints: [filterType, searchQuery, sortBy, page], page: 'first' });
         const cached = await queryCache.get(key);
         const previousData = cached ? cached.data : [];
 
-        // Update Cache Immediately
         if (cached) {
             const updatedData = cached.data.map((c: Client) => c.id === client.id ? client : c);
             await queryCache.set(key, updatedData, currentUser.uid);
-            refresh(); // Trigger re-render from cache
+            refresh();
         }
 
         try {
             await firebaseService.updateClient(currentUser.uid, client);
         } catch (err) {
-            // Rollback
             if (cached) {
                 await queryCache.set(key, previousData, currentUser.uid);
                 refresh();
             }
             throw err;
         }
-    }, [currentUser, refresh, filterType, searchQuery, sortBy]);
+    }, [currentUser, refresh, filterType, searchQuery, sortBy, page]);
 
     const deleteClient = useCallback(async (clientId: string) => {
         if (!currentUser) return;
 
-        // Optimistic Update
-        const key = queryCache.generateKey('clients', currentUser.uid, { constraints: [filterType, searchQuery, sortBy], page: 'first' });
+        // Key must match what useFirestoreQuery stores: dependencies = [filterType, searchQuery, sortBy, page]
+        const key = queryCache.generateKey('clients', currentUser.uid, { constraints: [filterType, searchQuery, sortBy, page], page: 'first' });
         const cached = await queryCache.get(key);
         const previousData = cached ? cached.data : [];
 
@@ -145,16 +143,15 @@ export const useClients = (
 
         try {
             await firebaseService.deleteClient(currentUser.uid, clientId);
-            setCountVersion(v => v + 1); // Trigger count refresh
+            setCountVersion(v => v + 1);
         } catch (err) {
-            // Rollback
             if (cached) {
                 await queryCache.set(key, previousData, currentUser.uid);
                 refresh();
             }
             throw err;
         }
-    }, [currentUser, refresh, filterType, searchQuery, sortBy]);
+    }, [currentUser, refresh, filterType, searchQuery, sortBy, page]);
 
     const bulkDeleteClients = useCallback(async (ids: string[]) => {
         if (!currentUser) return;

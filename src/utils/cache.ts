@@ -3,13 +3,14 @@ import { logger } from './logger';
 const DB_NAME = 'BiztrackCache';
 const DB_VERSION = 1;
 const STORE_NAME = 'queries';
+const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
 interface CacheEntry {
     key: string;
-    data: any[];
+    data: unknown[];
     timestamp: number;
     userId: string;
-    metadata?: any; // For pagination cursor etc
+    metadata?: Record<string, unknown>;
 }
 
 class CacheManager {
@@ -30,10 +31,10 @@ class CacheManager {
             const request = indexedDB.open(DB_NAME, DB_VERSION);
 
             request.onerror = (event) => {
-                logger.error("IndexedDB error:", (event.target as any).error);
-                // Fallback to memory only if DB fails to open
+                const err = (event.target as IDBOpenDBRequest).error;
+                logger.error("IndexedDB error:", err);
                 this.isSupported = false;
-                reject((event.target as any).error);
+                reject(err);
             };
 
             request.onsuccess = (event) => {
@@ -51,7 +52,7 @@ class CacheManager {
         });
     }
 
-    async set(key: string, data: any[], userId: string, metadata?: any): Promise<void> {
+    async set(key: string, data: unknown[], userId: string, metadata?: Record<string, unknown>): Promise<void> {
         const entry: CacheEntry = {
             key,
             data,
@@ -81,8 +82,14 @@ class CacheManager {
 
     async get(key: string): Promise<CacheEntry | null> {
         // Check memory first
-        if (this.memoryCache.has(key)) {
-            return this.memoryCache.get(key) || null;
+        const memEntry = this.memoryCache.get(key);
+        if (memEntry) {
+            if (Date.now() - memEntry.timestamp > CACHE_TTL_MS) {
+                this.memoryCache.delete(key);
+                void this.deleteFromDB(key);
+                return null;
+            }
+            return memEntry;
         }
 
         if (!this.isSupported || !this.dbPromise) return null;
@@ -96,17 +103,35 @@ class CacheManager {
             return new Promise((resolve) => {
                 request.onsuccess = () => {
                     const result = request.result as CacheEntry;
-                    if (result) {
-                        // Hydrate memory cache
-                        this.memoryCache.set(key, result);
+                    if (!result) { resolve(null); return; }
+
+                    if (Date.now() - result.timestamp > CACHE_TTL_MS) {
+                        this.memoryCache.delete(key);
+                        void this.deleteFromDB(key);
+                        resolve(null);
+                        return;
                     }
-                    resolve(result || null);
+
+                    // Hydrate memory cache
+                    this.memoryCache.set(key, result);
+                    resolve(result);
                 };
                 request.onerror = () => resolve(null); // Fail gracefully
             });
         } catch (error) {
             logger.error("Failed to read from cache:", error);
             return null;
+        }
+    }
+
+    private async deleteFromDB(key: string): Promise<void> {
+        if (!this.isSupported || !this.dbPromise) return;
+        try {
+            const db = await this.dbPromise;
+            const tx = db.transaction(STORE_NAME, 'readwrite');
+            tx.objectStore(STORE_NAME).delete(key);
+        } catch (error) {
+            logger.error("Failed to delete expired cache entry:", error);
         }
     }
 
@@ -137,8 +162,9 @@ class CacheManager {
     }
 
     // Helper to generate consistent keys
-    generateKey(collection: string, userId: string, queryParams: any = {}): string {
-        return `${userId}:${collection}:${JSON.stringify(queryParams)}`;
+    generateKey(collection: string, userId: string, queryParams: Record<string, unknown> = {}): string {
+        const stable = JSON.stringify(queryParams, Object.keys(queryParams).sort());
+        return `${userId}:${collection}:${stable}`;
     }
 }
 

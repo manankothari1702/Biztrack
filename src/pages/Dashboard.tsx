@@ -11,7 +11,8 @@ import UpcomingFollowUps from '../components/dashboard/UpcomingFollowUps';
 import RecentActivity from '../components/dashboard/RecentActivity';
 import DashboardSearch from '../components/dashboard/DashboardSearch';
 import CallOutcomeModal, { type OutcomeResult } from '../components/clients/CallOutcomeModal';
-import { faUsers, faPhone } from '@fortawesome/free-solid-svg-icons';
+import { faUsers, faPhone, faExclamationTriangle, faTimes } from '@fortawesome/free-solid-svg-icons';
+import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import type { Client } from '../types';
 import { fromInputDate } from '../utils/dateUtils';
 import LoadingScreen from '../components/common/LoadingScreen';
@@ -26,6 +27,8 @@ const Dashboard: React.FC = () => {
         upcomingFollowUps,
         counts,
         loading,
+        hasError,
+        failedSections,
         refresh,
         loadMoreDue,
         loadMoreTasks,
@@ -38,14 +41,22 @@ const Dashboard: React.FC = () => {
     // Data Migration: Normalize Client Names (Runs once)
     React.useEffect(() => {
         if (currentUser) {
-            import('../services/migrationService').then(mod => {
-                mod.runDataMigration(currentUser.uid);
-            });
+            import('../services/migrationService')
+                .then(mod => mod.runDataMigration(currentUser.uid))
+                .catch(() => {
+                    error('Data sync issue', 'Search index update failed. Some search results may be incomplete. This will retry on next load.');
+                });
         }
     }, [currentUser]);
 
     const { updateClient } = useClients();
     const [selectedClientForOutcome, setSelectedClientForOutcome] = useState<Client | null>(null);
+    const [bannerDismissed, setBannerDismissed] = useState(false);
+
+    // Re-show banner if new errors appear after a retry
+    React.useEffect(() => {
+        if (hasError) setBannerDismissed(false);
+    }, [hasError]);
 
     if (loading) {
         return <LoadingScreen />;
@@ -98,6 +109,30 @@ const Dashboard: React.FC = () => {
 
     return (
         <div className="space-y-8 max-w-[1600px] mx-auto pb-12 min-w-0 px-0 overflow-x-hidden font-sans">
+            {/* Partial-load error banner */}
+            {hasError && !bannerDismissed && (
+                <div className="flex items-start gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                    <FontAwesomeIcon icon={faExclamationTriangle} className="mt-0.5 shrink-0 text-amber-500" />
+                    <div className="flex-1">
+                        <span className="font-semibold">Some data failed to load: </span>
+                        {failedSections.join(', ')}.
+                        {' '}Figures shown may be incomplete.{' '}
+                        <button
+                            onClick={() => { setBannerDismissed(true); refresh(); }}
+                            className="underline font-semibold hover:text-amber-900"
+                        >
+                            Retry
+                        </button>
+                    </div>
+                    <button
+                        onClick={() => setBannerDismissed(true)}
+                        aria-label="Dismiss"
+                        className="shrink-0 text-amber-400 hover:text-amber-700"
+                    >
+                        <FontAwesomeIcon icon={faTimes} />
+                    </button>
+                </div>
+            )}
             {/* Header: title + search */}
             <header className="flex flex-col md:flex-row md:items-center md:justify-between gap-6 mb-8">
                 <div>
@@ -152,7 +187,7 @@ const Dashboard: React.FC = () => {
             </section>
 
             {/* Stats row */}
-            <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6" aria-label="Key metrics">
+            <section className="grid grid-cols-2 lg:grid-cols-4 gap-6" aria-label="Key metrics">
                 <StatsCard
                     title="Calls Due"
                     value={counts.dueCalls}

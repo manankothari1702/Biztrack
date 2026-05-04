@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useData } from '../context/DataContext';
 import { useToast } from '../context/ToastContext';
 import { OrgLevel } from '../types';
-import type { OrgNode } from '../types';
+import type { OrgNode, FlatOrgNode } from '../types';
 import OrgNodeComponent from '../components/team/OrgNodeComponent';
 import NodeModal from '../components/team/NodeModal';
 import { BusinessLevelLegend } from '../components/common/BusinessLevelLegend';
@@ -50,20 +50,12 @@ const Team: React.FC = () => {
     useEffect(() => {
         if (!orgTree && userProfile.name) {
             // Create root node for the user if tree is empty
-            const rootNode: OrgNode = {
-                id: 'root', // Or generate a UUID? 'root' is special in previous logic, but UUID is better for collision. 
-                // However, 'root' ID was used in initialOrgTree. 
-                // Let's stick to a consistent ID or allow 'root'.
-                // Rule 1: "Use this collection to populate...". 
-                // Ideally, we use UUIDs. But to map "Me", we can check level/email.
-                // Let's use 'root' for simplicity as per existing logic, or a UUID.
-                // If I use 'root', it might conflict if I have multiple users in same collection? 
-                // No, collection is `users/{uid}/orgNodes`. So 'root' ID is unique per user. Safe.
+            const rootNode: FlatOrgNode = {
+                id: 'root',
                 name: userProfile.name,
                 role: 'You',
                 level: userProfile.level || OrgLevel.Root,
                 parentId: null,
-                children: []
             };
             addOrgNode(rootNode).catch(err => logger.error(err));
         }
@@ -117,21 +109,20 @@ const Team: React.FC = () => {
         setDeleteNodeId(null);
     };
 
-    const handleSaveNode = async (nodeData: Partial<OrgNode>) => {
+    const handleSaveNode = async (nodeData: Partial<FlatOrgNode>) => {
         try {
             if (editingNode) {
-                // Update
-                const updatedNode = { ...editingNode, ...nodeData } as OrgNode;
+                // eslint-disable-next-line @typescript-eslint/no-unused-vars
+                const { children, ...flatEditing } = editingNode;
+                const updatedNode: FlatOrgNode = { ...flatEditing, ...nodeData };
                 await updateOrgNode(updatedNode);
             } else if (parentIdForAdd) {
-                // Add Subordinate
-                const newNode: OrgNode = {
+                const newNode: FlatOrgNode = {
                     id: crypto.randomUUID(),
                     name: nodeData.name!,
                     role: nodeData.role!,
                     level: nodeData.level!,
                     parentId: parentIdForAdd,
-                    children: [] // Will be ignored by Firestore save
                 };
                 await addOrgNode(newNode);
                 success('Member Added', `${newNode.name} added to the team.`);
@@ -161,7 +152,7 @@ const Team: React.FC = () => {
                 </div>
 
                 {/* Legend */}
-                <div className="w-full xl:w-auto overflow-x-auto pb-2 xl:pb-0">
+                <div className="w-full xl:w-auto">
                     <BusinessLevelLegend />
                 </div>
             </div>

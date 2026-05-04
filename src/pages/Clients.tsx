@@ -60,9 +60,12 @@ const Clients: React.FC = () => {
     const { currentUser } = useAuth();
     React.useEffect(() => {
         if (currentUser) {
-            import('../services/migrationService').then(mod => {
-                mod.runDataMigration(currentUser.uid);
-            });
+            import('../services/migrationService')
+                .then(mod => mod.runDataMigration(currentUser.uid))
+                .catch(() => {
+                    // Migration failure is non-fatal — search may be degraded until next load
+                    // Toast is intentionally omitted here since Dashboard already shows it
+                });
         }
     }, [currentUser]);
 
@@ -262,8 +265,14 @@ const Clients: React.FC = () => {
     // Excel Handlers
     const fileInputRef = React.useRef<HTMLInputElement>(null);
 
-    const handleExport = () => {
-        exportClientsToExcel(clients);
+    const handleExport = async () => {
+        try {
+            await exportClientsToExcel(clients);
+            success('Export complete', 'Your client list has been downloaded.');
+        } catch (err) {
+            logger.error('Export failed:', err);
+            error('Export failed', 'Could not generate the Excel file. Please try again.');
+        }
     };
 
     const handleImportClick = () => {

@@ -24,9 +24,11 @@ export const useTasks = (
         constraints.push(where('status', '==', status));
     }
     // 'Overdue' Handling
+    // Only filter by dueDate server-side — combining status != and dueDate < on different
+    // fields would require a multi-inequality composite index and is error-prone.
+    // Completed tasks are filtered out client-side below.
     if (status === 'Overdue') {
         const now = new Date().toISOString();
-        constraints.push(where('status', '!=', 'Completed'));
         constraints.push(where('dueDate', '<', now));
     }
 
@@ -36,19 +38,36 @@ export const useTasks = (
     }
 
     // Sort
-    if (sortBy === 'priority') {
+    // For Overdue, the dueDate inequality forces the first orderBy to be dueDate.
+    // Priority sort is applied client-side after fetch in that case.
+    if (status === 'Overdue') {
+        constraints.push(orderBy('dueDate', 'asc'));
+    } else if (sortBy === 'priority') {
         constraints.push(orderBy('priority', 'desc'));
         constraints.push(orderBy('dueDate', 'asc'));
     } else {
         constraints.push(orderBy('dueDate', 'asc'));
     }
 
-    const { data: tasks, loading, error, hasMore, loadMore, refresh } = useFirestoreQuery<Task>(
+    const { data: rawTasks, loading, error, hasMore, loadMore, refresh } = useFirestoreQuery<Task>(
         'tasks',
         constraints,
         pageSize,
         [status, priority, sortBy]
     );
+
+    // For Overdue: exclude completed tasks and apply priority sort client-side if needed
+    const tasks = (() => {
+        if (status !== 'Overdue') return rawTasks;
+        const filtered = rawTasks.filter(t => t.status !== 'Completed');
+        if (sortBy === 'priority') {
+            const order = { High: 0, Medium: 1, Low: 2 };
+            return [...filtered].sort((a, b) =>
+                (order[a.priority] ?? 3) - (order[b.priority] ?? 3)
+            );
+        }
+        return filtered;
+    })();
 
     const addTask = useCallback(async (task: Task) => {
         if (!currentUser) return;

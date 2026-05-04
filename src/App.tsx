@@ -38,8 +38,8 @@ const App: React.FC = () => {
                 <Route path="/404" element={<NotFound />} />
               </Routes>
             </Router>
-            <ToastContainer />
           </DataProvider>
+          <ToastContainer />
         </ToastProvider>
       </AuthProvider>
     </ErrorBoundary>

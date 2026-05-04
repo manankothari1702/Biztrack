@@ -15,12 +15,13 @@ import {
     browserLocalPersistence,
     browserSessionPersistence,
 } from 'firebase/auth';
-import type { User } from 'firebase/auth';
+import type { User, FirebaseError } from 'firebase/auth';
 import { auth, db } from '../lib/firebase';
 import { doc, setDoc, getDoc, serverTimestamp, updateDoc } from 'firebase/firestore';
 import { logger } from '../utils/logger';
 import { OrgLevel } from '../types';
 import { normalizeEmail } from '../utils/stringUtils';
+import { queryCache } from '../utils/cache';
 
 interface AuthContextType {
     currentUser: User | null;
@@ -33,7 +34,7 @@ interface AuthContextType {
     updateEmailAddress: (email: string) => Promise<void>;
     updateUserPassword: (password: string) => Promise<void>;
     resetPassword: (email: string) => Promise<void>;
-    googleSignIn: () => Promise<void>;
+    googleSignIn: (rememberMe?: boolean) => Promise<void>;
     deleteAccount: () => Promise<void>;
 }
 
@@ -55,16 +56,17 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
                     const userDocRef = doc(db, 'users', user.uid);
                     const userDocSnap = await getDoc(userDocRef);
                     if (userDocSnap.exists() && userDocSnap.data().deletionRequested) {
-                        alert("This account is scheduled for deletion.");
                         await signOut(auth);
                         setCurrentUser(null);
+                        sessionStorage.setItem('auth_blocked', 'account_pending_deletion');
                     } else {
                         setCurrentUser(user);
                     }
                 } catch (error) {
-                    // Fallback if we can't check status (e.g. offline) - allow login but logs error
+                    // Fail closed: cannot verify account status, deny access
                     logger.error("Error checking account status:", error);
-                    setCurrentUser(user);
+                    await signOut(auth);
+                    setCurrentUser(null);
                 }
             } else {
                 setCurrentUser(null);
@@ -108,16 +110,20 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         try {
             await setDoc(doc(db, 'users', userCredential.user.uid), newUserProfile);
         } catch (error) {
+            // Auth account was created but Firestore profile failed.
+            // Sign out to leave a clean state so the user can retry from scratch.
             logger.error("Error creating user profile in Firestore:", error);
+            await signOut(auth);
+            throw new Error('Account created but profile setup failed. Please try signing up again.');
         }
 
         // Force refresh user to get displayName
         setCurrentUser({ ...userCredential.user, displayName: name });
     };
 
-    const googleSignIn = async () => {
-        // Always use local persistence for Google Sign In
-        await setPersistence(auth, browserLocalPersistence);
+    const googleSignIn = async (rememberMe: boolean = true) => {
+        const persistence = rememberMe ? browserLocalPersistence : browserSessionPersistence;
+        await setPersistence(auth, persistence);
 
         const provider = new GoogleAuthProvider();
         const result = await signInWithPopup(auth, provider);
@@ -143,12 +149,15 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
             try {
                 await setDoc(userDocRef, newUserProfile);
             } catch (error) {
+                // Auth succeeded but Firestore profile failed.
+                // Sign out to leave a clean state so the user can retry.
                 logger.error("Error creating user profile in Firestore for Google user:", error);
+                await signOut(auth);
+                throw new Error('Sign-in succeeded but profile setup failed. Please try again.');
             }
         } else if (userDocSnap.data().deletionRequested) {
-            // Block login if deletion requested
             await signOut(auth);
-            alert("Account is scheduled for deletion.");
+            sessionStorage.setItem('auth_blocked', 'account_pending_deletion');
             return;
         }
     };
@@ -166,6 +175,9 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     };
 
     const logout = async () => {
+        if (currentUser) {
+            void queryCache.clearUserCache(currentUser.uid);
+        }
         await signOut(auth);
     };
 
@@ -208,8 +220,15 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
             updateEmailAddress: async (email: string) => {
                 if (currentUser) {
                     const normalizedEmail = normalizeEmail(email);
-                    await updateEmail(currentUser, normalizedEmail);
-                    setCurrentUser({ ...currentUser, email: normalizedEmail });
+                    try {
+                        await updateEmail(currentUser, normalizedEmail);
+                        setCurrentUser({ ...currentUser, email: normalizedEmail });
+                    } catch (error) {
+                        if ((error as FirebaseError).code === 'auth/requires-recent-login') {
+                            throw new Error('Please sign out and sign back in before changing your email.');
+                        }
+                        throw error;
+                    }
                 }
             },
             updateUserPassword: async (password: string) => {

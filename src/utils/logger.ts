@@ -8,7 +8,7 @@ type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 class Logger {
     private isDev = import.meta.env.MODE === 'development';
 
-    private logToConsole(level: LogLevel, ...args: any[]) {
+    private logToConsole(level: LogLevel, ...args: unknown[]) {
         // In production, we might want to suppress debug/info logs or send errors to a service
         if (!this.isDev && (level === 'debug' || level === 'info')) {
             return;
@@ -33,19 +33,19 @@ class Logger {
         }
     }
 
-    debug(...args: any[]) {
+    debug(...args: unknown[]) {
         this.logToConsole('debug', ...args);
     }
 
-    info(...args: any[]) {
+    info(...args: unknown[]) {
         this.logToConsole('info', ...args);
     }
 
-    warn(...args: any[]) {
+    warn(...args: unknown[]) {
         this.logToConsole('warn', ...args);
     }
 
-    error(...args: any[]) {
+    error(...args: unknown[]) {
         this.logToConsole('error', ...args);
     }
 }

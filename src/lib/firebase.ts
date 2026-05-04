@@ -1,7 +1,8 @@
 import { initializeApp } from "firebase/app";
-import { getAuth } from "firebase/auth";
+import { getAuth, connectAuthEmulator } from "firebase/auth";
 import { getAnalytics } from "firebase/analytics";
-import { getFirestore } from "firebase/firestore";
+import { getFirestore, connectFirestoreEmulator } from "firebase/firestore";
+import { initializeAppCheck, ReCaptchaV3Provider } from "firebase/app-check";
 import { logger } from "../utils/logger";
 
 // Firebase configuration loaded from environment variables
@@ -39,6 +40,41 @@ if (missingVars.length > 0) {
 
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
+
+// App Check — prevents quota abuse by enforcing only your app can call Firebase.
+// DEV:  A debug token is auto-generated and printed to the browser console on first run.
+//       Copy it and add it in Firebase Console → App Check → Apps → Manage debug tokens.
+// PROD: Requires VITE_RECAPTCHA_SITE_KEY (reCAPTCHA v3 site key).
+//       Get one at https://www.google.com/recaptcha/admin/create → reCAPTCHA v3.
+//       Then enable enforcement in Firebase Console → App Check → Apps.
+if (import.meta.env.DEV) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (self as any).FIREBASE_APPCHECK_DEBUG_TOKEN =
+        import.meta.env.VITE_APPCHECK_DEBUG_TOKEN || true;
+}
+const recaptchaSiteKey = import.meta.env.VITE_RECAPTCHA_SITE_KEY as string | undefined;
+if (recaptchaSiteKey) {
+    initializeAppCheck(app, {
+        provider: new ReCaptchaV3Provider(recaptchaSiteKey),
+        isTokenAutoRefreshEnabled: true,
+    });
+} else {
+    logger.warn(
+        'Firebase App Check is not active. ' +
+        'Set VITE_RECAPTCHA_SITE_KEY in .env to protect against quota abuse.'
+    );
+}
+
 export const auth = getAuth(app);
-export const analytics = getAnalytics(app);
 export const db = getFirestore(app);
+
+// Connect to local emulators when VITE_USE_EMULATOR=true
+// Analytics is disabled in emulator mode (it has no emulator and would fail)
+if (import.meta.env.VITE_USE_EMULATOR === 'true') {
+    connectAuthEmulator(auth, 'http://localhost:9099', { disableWarnings: true });
+    connectFirestoreEmulator(db, 'localhost', 8080);
+    logger.info('Connected to Firebase Emulators (Auth:9099, Firestore:8080)');
+} else {
+    // Analytics only in production — has no emulator equivalent
+    getAnalytics(app);
+}

@@ -25,6 +25,9 @@ import PhoneNumberInput from '../components/common/PhoneNumberInput';
 import { OrgLevel } from '../types';
 import { logger } from '../utils/logger';
 
+const MAX_PHOTO_BYTES = 200 * 1024; // 200 KB
+const ALLOWED_PHOTO_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+
 const Profile: React.FC = () => {
     const { userProfile, updateUserProfile } = useData();
     const { success, error: showError, info } = useToast();
@@ -89,13 +92,24 @@ const Profile: React.FC = () => {
 
     const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
-        if (file) {
-            const reader = new FileReader();
-            reader.onloadend = () => {
-                setFormData(prev => ({ ...prev, photoURL: reader.result as string }));
-            };
-            reader.readAsDataURL(file);
+        if (!file) return;
+
+        if (!ALLOWED_PHOTO_TYPES.includes(file.type)) {
+            showError('Invalid File', 'Only JPEG, PNG, WebP, or GIF images are allowed.');
+            e.target.value = '';
+            return;
         }
+        if (file.size > MAX_PHOTO_BYTES) {
+            showError('File Too Large', 'Profile photo must be under 200 KB.');
+            e.target.value = '';
+            return;
+        }
+
+        const reader = new FileReader();
+        reader.onloadend = () => {
+            setFormData(prev => ({ ...prev, photoURL: reader.result as string }));
+        };
+        reader.readAsDataURL(file);
     };
 
     const handleSaveProfile = async () => {

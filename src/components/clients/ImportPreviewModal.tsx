@@ -236,12 +236,17 @@ const ImportPreviewModal: React.FC<ImportPreviewModalProps> = ({ isOpen, onClose
 
 
 
-    const handleDownloadErrors = () => {
+    const handleDownloadErrors = async () => {
         const errorRows = rows.filter(r => !r.isValid).map(r => ({
             ...r.client,
             Errors: r.errors.join(', ')
         }));
-        exportToExcel(errorRows, 'Import_Errors');
+        try {
+            await exportToExcel(errorRows, 'Import_Errors');
+        } catch (err) {
+            logger.error('Error report download failed:', err);
+            showError('Download failed', 'Could not generate the error report. Please try again.');
+        }
     };
 
     const handleConfirmImport = async () => {

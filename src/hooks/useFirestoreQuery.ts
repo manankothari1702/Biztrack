@@ -39,7 +39,7 @@ export function useFirestoreQuery<T extends { id: string }>(
     collectionPath: string,
     constraints: QueryConstraint[] = [],
     pageSize: number = 50,
-    dependencies: any[] = []
+    dependencies: unknown[] = []
 ): UseFirestoreQueryResult<T> {
     const { currentUser } = useAuth();
     const { error: showError } = useToast();

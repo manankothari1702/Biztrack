@@ -3,9 +3,23 @@ import { useAuth } from '../context/AuthContext';
 import { db } from '../lib/firebase';
 import { collection, query, where, orderBy, limit, getCountFromServer, getDocs } from 'firebase/firestore';
 import type { Client, Task } from '../types';
+import { logger } from '../utils/logger';
+
+// Section keys used to track which parts of the dashboard failed to load
+type DashboardSection = 'counts' | 'recentClients' | 'dueClients' | 'priorityTasks' | 'recentContacts' | 'upcomingFollowUps';
+
+const SECTION_LABELS: Record<DashboardSection, string> = {
+    counts:           'Summary counts',
+    recentClients:    'Recent clients',
+    dueClients:       'Due calls list',
+    priorityTasks:    'Priority tasks',
+    recentContacts:   'Recent contacts',
+    upcomingFollowUps:'Upcoming follow-ups',
+};
 
 export const useDashboardData = () => {
     const { currentUser } = useAuth();
+
     const [counts, setCounts] = useState({
         totalClients: 0,
         activeClients: 0,
@@ -15,84 +29,67 @@ export const useDashboardData = () => {
         completedTasks: 0
     });
 
+    // Tracks which sections failed their last fetch
+    const [failedSections, setFailedSections] = useState<Set<DashboardSection>>(new Set());
+
+    const markFailed = (section: DashboardSection) =>
+        setFailedSections(prev => new Set(prev).add(section));
+
+    const markOk = (section: DashboardSection) =>
+        setFailedSections(prev => { const next = new Set(prev); next.delete(section); return next; });
+
     // Limits for progressive loading
     const [dueLimit, setDueLimit] = useState(100);
     const [tasksLimit, setTasksLimit] = useState(100);
 
-    // 1. Fetch Counts (Real-time Metrics)
+    // 1. Fetch Counts
     useEffect(() => {
         if (!currentUser) return;
 
         const fetchCounts = async () => {
             try {
                 const clientsRef = collection(db, `users/${currentUser.uid}/clients`);
-                const tasksRef = collection(db, `users/${currentUser.uid}/tasks`);
+                const tasksRef   = collection(db, `users/${currentUser.uid}/tasks`);
 
-                // Total Clients
-                const totalSnap = await getCountFromServer(clientsRef);
-                const totalClients = totalSnap.data().count;
-
-                // Active Clients (Estimate: Total - Archived? Or separate query if index exists. 
-                // Since we resolved index issues by avoiding composite queries, we might not have 'status' index.
-                // For Dashboard metrics, exact server count is best. If index missing, maybe client-side valid for now if list is small?
-                // User requirement: "must not be paginated... always represent full dataset".
-                // If we can't query status==Active server-side without index, we can't do exact server count.
-                // However, we can use the "Recent Clients" or "All Clients" fetch in useClients to know total.
-                // Let's assume for now we use totalClients as "Active Clients" proxy or Fetch total separately if index exists.
-                // Actually, the user fixed index errors. Let's try simple queries.
-                // If they fail, we fallback.
-
-                // Let's rely on totalClients for now to avoid risk, or client-side filter if dataset < N.
-                // Actually, for "Active Clients" metric, let's just use total count of users in DB for now as "Total Database".
-
-                // Due Calls Count (NextFollowUp <= Today)
-                // Use the same Single Field Index query as useDueClients (Date only)
                 const today = new Date();
                 today.setHours(23, 59, 59, 999);
                 const todayIso = today.toISOString();
 
-                const dueQuery = query(clientsRef, where('nextFollowUpDate', '<=', todayIso));
-                const dueSnap = await getCountFromServer(dueQuery);
-                const dueCalls = dueSnap.data().count;
-
-                // Tasks Counts
-                // Pending
-                const pendingQuery = query(tasksRef, where('status', '!=', 'Completed'));
-                const pendingSnap = await getCountFromServer(pendingQuery);
-                const pendingTasks = pendingSnap.data().count;
-
-                // Completed
-                const completedQuery = query(tasksRef, where('status', '==', 'Completed'));
-                const completedSnap = await getCountFromServer(completedQuery);
-                const completedTasks = completedSnap.data().count;
-
-                // Overdue (Approximate by Date only to avoid composite index)
-                const overdueTaskQuery = query(tasksRef, where('dueDate', '<', new Date().toISOString()));
-                const overdueSnap = await getCountFromServer(overdueTaskQuery);
-                const overdueTasks = overdueSnap.data().count;
+                const [
+                    totalSnap,
+                    dueSnap,
+                    pendingSnap,
+                    completedSnap,
+                    overdueSnap,
+                ] = await Promise.all([
+                    getCountFromServer(clientsRef),
+                    getCountFromServer(query(clientsRef, where('nextFollowUpDate', '<=', todayIso))),
+                    getCountFromServer(query(tasksRef,   where('status', '!=', 'Completed'))),
+                    getCountFromServer(query(tasksRef,   where('status', '==', 'Completed'))),
+                    getCountFromServer(query(tasksRef,   where('dueDate', '<', new Date().toISOString()))),
+                ]);
 
                 setCounts({
-                    totalClients,
-                    activeClients: totalClients, // detailed status count requires index or client-side
-                    dueCalls,
-                    pendingTasks,
-                    overdueTasks,
-                    completedTasks
+                    totalClients:  totalSnap.data().count,
+                    activeClients: totalSnap.data().count,
+                    dueCalls:      dueSnap.data().count,
+                    pendingTasks:  pendingSnap.data().count,
+                    completedTasks:completedSnap.data().count,
+                    overdueTasks:  overdueSnap.data().count,
                 });
-
+                markOk('counts');
             } catch (err) {
-                console.error("Failed to fetch dashboard counts:", err);
+                logger.error('Failed to fetch dashboard counts:', err);
+                markFailed('counts');
             }
         };
 
         fetchCounts();
-    }, [currentUser]); // Refresh on mount/user change
+    }, [currentUser]);
 
 
     // 2. Lists with Progressive Loading
 
-    // Recent Clients (Fixed 5)
-    // Query: Order by createdAt desc only
     const [recentClients, setRecentClients] = useState<Client[]>([]);
     const [loadingRecent, setLoadingRecent] = useState(true);
 
@@ -106,13 +103,17 @@ export const useDashboardData = () => {
                 limit(5)
             );
             const snap = await getDocs(q);
-            const data = snap.docs.map(d => ({ id: d.id, ...d.data() } as Client));
-            setRecentClients(data);
-        } catch (e) { console.error(e); } finally { setLoadingRecent(false); }
+            setRecentClients(snap.docs.map(d => ({ id: d.id, ...d.data() } as Client)));
+            markOk('recentClients');
+        } catch (err) {
+            logger.error('Failed to fetch recent clients:', err);
+            markFailed('recentClients');
+        } finally {
+            setLoadingRecent(false);
+        }
     }, [currentUser]);
 
 
-    // Due Clients (Outreach List) - Single Index (Date)
     const [dueClients, setDueClients] = useState<Client[]>([]);
     const [loadingDue, setLoadingDue] = useState(true);
 
@@ -120,27 +121,29 @@ export const useDashboardData = () => {
         if (!currentUser) return;
         setLoadingDue(true);
         try {
-            // Query by date only (no status filter to avoid index error)
-            // Filter 'Active' client-side
             const today = new Date();
             today.setHours(23, 59, 59, 999);
-
             const q = query(
                 collection(db, `users/${currentUser.uid}/clients`),
                 where('nextFollowUpDate', '<=', today.toISOString()),
                 orderBy('nextFollowUpDate', 'asc'),
                 limit(dueLimit)
             );
-
             const snap = await getDocs(q);
-            const data = snap.docs.map(d => ({ id: d.id, ...d.data() } as Client));
-            // Client-side filter for status
-            setDueClients(data.filter(c => c.status === 'Active'));
-        } catch (e) { console.error(e); } finally { setLoadingDue(false); }
+            setDueClients(
+                snap.docs.map(d => ({ id: d.id, ...d.data() } as Client))
+                    .filter(c => c.status === 'Active')
+            );
+            markOk('dueClients');
+        } catch (err) {
+            logger.error('Failed to fetch due clients:', err);
+            markFailed('dueClients');
+        } finally {
+            setLoadingDue(false);
+        }
     }, [currentUser, dueLimit]);
 
 
-    // Priority Tasks
     const [priorityTasks, setPriorityTasks] = useState<Task[]>([]);
     const [loadingTasks, setLoadingTasks] = useState(true);
 
@@ -148,22 +151,28 @@ export const useDashboardData = () => {
         if (!currentUser) return;
         setLoadingTasks(true);
         try {
-            // Order by Date, filter status/priority client-side
             const q = query(
                 collection(db, `users/${currentUser.uid}/tasks`),
                 orderBy('dueDate', 'asc'),
                 limit(tasksLimit)
             );
             const snap = await getDocs(q);
-            const data = snap.docs.map(d => ({ id: d.id, ...d.data() } as Task));
-            // Filter
-            setPriorityTasks(data.filter(t => t.status !== 'Completed' && t.priority === 'High'));
-        } catch (e) { console.error(e); } finally { setLoadingTasks(false); }
+            setPriorityTasks(
+                snap.docs.map(d => ({ id: d.id, ...d.data() } as Task))
+                    .filter(t => t.status !== 'Completed' && t.priority === 'High')
+            );
+            markOk('priorityTasks');
+        } catch (err) {
+            logger.error('Failed to fetch priority tasks:', err);
+            markFailed('priorityTasks');
+        } finally {
+            setLoadingTasks(false);
+        }
     }, [currentUser, tasksLimit]);
 
 
-    // Recent Contacts
     const [recentContacts, setRecentContacts] = useState<Client[]>([]);
+
     const fetchRecentContacts = useCallback(async () => {
         if (!currentUser) return;
         try {
@@ -175,18 +184,22 @@ export const useDashboardData = () => {
             );
             const snap = await getDocs(q);
             setRecentContacts(snap.docs.map(d => ({ id: d.id, ...d.data() } as Client)));
-        } catch (e) { console.error(e); }
+            markOk('recentContacts');
+        } catch (err) {
+            logger.error('Failed to fetch recent contacts:', err);
+            markFailed('recentContacts');
+        }
     }, [currentUser]);
 
-    // Upcoming Follow-ups (Next 7 Days)
+
     const [upcomingFollowUps, setUpcomingFollowUps] = useState<Client[]>([]);
+
     const fetchUpcoming = useCallback(async () => {
         if (!currentUser) return;
         try {
             const today = new Date();
             const nextWeek = new Date(today);
             nextWeek.setDate(nextWeek.getDate() + 7);
-
             const q = query(
                 collection(db, `users/${currentUser.uid}/clients`),
                 where('nextFollowUpDate', '>=', today.toISOString()),
@@ -195,49 +208,38 @@ export const useDashboardData = () => {
                 limit(20)
             );
             const snap = await getDocs(q);
-            const data = snap.docs.map(d => ({ id: d.id, ...d.data() } as Client));
-            setUpcomingFollowUps(data.filter(c => c.status === 'Active'));
-        } catch (e) { console.error(e); }
+            setUpcomingFollowUps(
+                snap.docs.map(d => ({ id: d.id, ...d.data() } as Client))
+                    .filter(c => c.status === 'Active')
+            );
+            markOk('upcomingFollowUps');
+        } catch (err) {
+            logger.error('Failed to fetch upcoming follow-ups:', err);
+            markFailed('upcomingFollowUps');
+        }
     }, [currentUser]);
 
 
-    useEffect(() => {
-        void fetchRecentClients();
-    }, [fetchRecentClients]);
+    useEffect(() => { void fetchRecentClients(); },  [fetchRecentClients]);
+    useEffect(() => { void fetchDueClients(); },     [fetchDueClients]);
+    useEffect(() => { void fetchPriorityTasks(); },  [fetchPriorityTasks]);
+    useEffect(() => { void fetchRecentContacts(); }, [fetchRecentContacts]);
+    useEffect(() => { void fetchUpcoming(); },       [fetchUpcoming]);
 
-    useEffect(() => {
-        void fetchDueClients();
-    }, [fetchDueClients]);
-
-    useEffect(() => {
-        void fetchPriorityTasks();
-    }, [fetchPriorityTasks]);
-
-    useEffect(() => {
-        void fetchRecentContacts();
-    }, [fetchRecentContacts]);
-
-    useEffect(() => {
-        void fetchUpcoming();
-    }, [fetchUpcoming]);
-
-    const refresh = () => {
-        // Trigger re-fetches
+    const refresh = useCallback(() => {
         fetchRecentClients();
         fetchDueClients();
         fetchPriorityTasks();
         fetchRecentContacts();
         fetchUpcoming();
-    };
+    }, [fetchRecentClients, fetchDueClients, fetchPriorityTasks, fetchRecentContacts, fetchUpcoming]);
 
-    // Logic to distinguish global loading vs incremental loading
-    // Initial loading is when we are fetching the first batch (limit === 100)
-    // Incremental is when limit > 100
+    const isInitialDueLoad    = loadingDue    && dueLimit    === 100;
+    const isInitialTasksLoad  = loadingTasks  && tasksLimit  === 100;
+    const isInitialRecentLoad = loadingRecent;
+    const isInitialCombined   = isInitialDueLoad || isInitialTasksLoad || isInitialRecentLoad;
 
-    const isInitialDueLoad = loadingDue && dueLimit === 100;
-    const isInitialTasksLoad = loadingTasks && tasksLimit === 100;
-    const isInitialRecentLoad = loadingRecent; // Always initial as it's fixed
-    const isInitialCombined = isInitialDueLoad || isInitialTasksLoad || isInitialRecentLoad;
+    const failedSectionLabels = Array.from(failedSections).map(k => SECTION_LABELS[k]);
 
     return {
         counts,
@@ -246,13 +248,14 @@ export const useDashboardData = () => {
         priorityTasks,
         recentContacts,
         upcomingFollowUps,
-        // Only trigger global loading screen on initial fetch
         loading: isInitialCombined,
-        // Expose granular loading for infinite scroll spinners
-        loadingMoreDue: loadingDue && dueLimit > 100,
+        loadingMoreDue:   loadingDue   && dueLimit   > 100,
         loadingMoreTasks: loadingTasks && tasksLimit > 100,
+        // Error surface — empty array means everything loaded fine
+        hasError: failedSections.size > 0,
+        failedSections: failedSectionLabels,
         refresh,
-        loadMoreDue: () => setDueLimit(prev => prev + 100),
-        loadMoreTasks: () => setTasksLimit(prev => prev + 100)
+        loadMoreDue:   () => setDueLimit(prev => prev + 100),
+        loadMoreTasks: () => setTasksLimit(prev => prev + 100),
     };
 };
