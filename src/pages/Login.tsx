@@ -4,7 +4,6 @@ import { useNavigate } from 'react-router-dom';
 import { confirmSignUp, resendSignUpCode } from 'aws-amplify/auth';
 import { logger } from '../utils/logger';
 import { normalizeEmail } from '../utils/stringUtils';
-import GoogleConsentModal from '../components/common/GoogleConsentModal';
 
 type Mode = 'login' | 'signup' | 'verify' | 'forgot';
 
@@ -23,7 +22,6 @@ const Login: React.FC = () => {
     const [info, setInfo]               = useState('');
     const [loading, setLoading]         = useState(false);
     const [resendCooldown, setResendCooldown]       = useState(0);
-    const [showGoogleConsent, setShowGoogleConsent] = useState(false);
 
     // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -134,7 +132,7 @@ const Login: React.FC = () => {
         }
     };
 
-    const handleGoogleConsentContinue = async () => {
+    const handleGoogleSignIn = async () => {
         setError(''); setLoading(true);
         try {
             await googleSignIn(); // triggers redirect — page unloads, so loading stays true
@@ -142,7 +140,6 @@ const Login: React.FC = () => {
             logger.error('Google sign-in error', err);
             setError('Google sign-in failed. Please try again.');
             setLoading(false);
-            setShowGoogleConsent(false);
         }
     };
 
@@ -159,13 +156,6 @@ const Login: React.FC = () => {
 
     return (
         <div className="min-h-screen flex items-center justify-center bg-slate-50 relative overflow-hidden">
-            {showGoogleConsent && (
-                <GoogleConsentModal
-                    loading={loading}
-                    onCancel={() => setShowGoogleConsent(false)}
-                    onContinue={handleGoogleConsentContinue}
-                />
-            )}
             {/* Background blobs */}
             <div className="absolute inset-0 z-0 opacity-40">
                 <div className="absolute top-0 -left-4 w-72 h-72 bg-blue-300 rounded-full mix-blend-multiply filter blur-xl opacity-70 animate-blob" />
@@ -251,11 +241,11 @@ const Login: React.FC = () => {
                         {mode !== 'forgot' && (
                             <>
                                 <button
-                                    onClick={() => setShowGoogleConsent(true)}
+                                    onClick={handleGoogleSignIn}
                                     disabled={loading}
                                     className="w-full py-3 px-4 bg-white border border-slate-200 rounded-xl text-slate-700 font-semibold hover:bg-slate-50 hover:border-slate-300 transition-all flex items-center justify-center gap-3 shadow-sm mb-6"
                                 >
-                                    <GoogleIcon />
+                                    {loading ? <Spinner /> : <GoogleIcon />}
                                     {mode === 'signup' ? 'Sign up with Google' : 'Sign in with Google'}
                                 </button>
                                 <Divider />
