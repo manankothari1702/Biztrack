@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
 import { useSearchParams, useLocation, useNavigate } from 'react-router-dom';
 import { useClients, useDueClients } from '../hooks/useClients';
-import { useAuth } from '../context/AuthContext'; // Added import
 import { useToast } from '../context/ToastContext';
 import type { Client, ClientType } from '../types';
 import ClientCard from '../components/clients/ClientCard';
@@ -56,18 +55,6 @@ const Clients: React.FC = () => {
     const { success, error } = useToast();
     const [selectedClientIds, setSelectedClientIds] = useState<Set<string>>(new Set());
 
-    // Data Migration: Ensure client names are normalized on this page too
-    const { currentUser } = useAuth();
-    React.useEffect(() => {
-        if (currentUser) {
-            import('../services/migrationService')
-                .then(mod => mod.runDataMigration(currentUser.uid))
-                .catch(() => {
-                    // Migration failure is non-fatal — search may be degraded until next load
-                    // Toast is intentionally omitted here since Dashboard already shows it
-                });
-        }
-    }, [currentUser]);
 
     // Modal States
     const [isClientModalOpen, setIsClientModalOpen] = useState(false);

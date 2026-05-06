@@ -4,9 +4,9 @@ import { useAuth } from '../context/AuthContext';
 import Layout from './layout/Layout';
 
 const PrivateRoute: React.FC = () => {
-    const { isAuthenticated } = useAuth();
+    const { currentUser } = useAuth();
 
-    return isAuthenticated ? (
+    return currentUser ? (
         <Layout>
             <Outlet />
         </Layout>

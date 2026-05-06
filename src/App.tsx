@@ -6,6 +6,7 @@ import { ToastProvider } from './context/ToastContext';
 import ErrorBoundary from './components/common/ErrorBoundary';
 import ToastContainer from './components/common/ToastContainer';
 import PrivateRoute from './components/PrivateRoute';
+import CompleteProfileModal from './components/common/CompleteProfileModal';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import NotFound from './pages/NotFound';
@@ -21,6 +22,7 @@ const App: React.FC = () => {
       <AuthProvider>
         <ToastProvider>
           <DataProvider>
+            <CompleteProfileModal />
             <Router>
               <Routes>
                 <Route path="/login" element={<Login />} />

@@ -1,20 +1,9 @@
 import { useState, useCallback } from 'react';
-import { collection, query, where, orderBy, getDocs, limit } from 'firebase/firestore';
-import { db } from '../lib/firebase';
+import { clientsApi } from '../services/apiService';
 import { useAuth } from '../context/AuthContext';
-import { firebaseService } from '../services/firebaseService';
 import { useToast } from '../context/ToastContext';
 import type { Client } from '../types';
 
-/**
- * useClientQuickSearch - Lightweight hook for quick client lookup.
- * 
- * This hook does NOT subscribe to real-time updates.
- * It performs on-demand queries with limited results.
- * Use this for search features like dashboard quick search.
- * 
- * For full client list management, use useClients() instead.
- */
 export const useClientQuickSearch = () => {
     const { currentUser } = useAuth();
     const { success, error: showError } = useToast();
@@ -29,81 +18,27 @@ export const useClientQuickSearch = () => {
 
         setLoading(true);
         try {
-            const clientsRef = collection(db, 'users', currentUser.uid, 'clients');
-
-            // Parallel Queries to support Name OR Phone
-            const searchLower = searchTerm.toLowerCase();
-            const searchDigits = searchTerm.replace(/\D/g, ''); // Extract digits only
-
-            const queries = [];
-
-            // 1. Name Query (Prefix)
-            const nameQuery = query(
-                clientsRef,
-                where('clientNameLower', '>=', searchLower),
-                where('clientNameLower', '<=', searchLower + '\uf8ff'),
-                orderBy('clientNameLower', 'asc'),
-                limit(5)
-            );
-            queries.push(getDocs(nameQuery));
-
-            // 2. Phone Query (Prefix ONLY) - Only if we have digits
-            if (searchDigits.length > 2) { // Minimum 3 digits to search phone
-                // Prefix Search (e.g. "9876" or full "9876543210")
-                const phonePrefixQuery = query(
-                    clientsRef,
-                    where('mobileDigits', '>=', searchDigits),
-                    where('mobileDigits', '<=', searchDigits + '\uf8ff'),
-                    limit(5)
-                );
-                queries.push(getDocs(phonePrefixQuery));
-
-                // NOTE: Suffix/Last-Digits search (mobileReverse) is intentionally removed per user request.
-            }
-
-            // Execute all queries
-            const snapshots = await Promise.all(queries);
-
-            // Merge & Deduplicate
-            const clientMap = new Map<string, Client>();
-
-            snapshots.forEach(snap => {
-                snap.docs.forEach(doc => {
-                    if (!clientMap.has(doc.id)) {
-                        clientMap.set(doc.id, { id: doc.id, ...doc.data() } as Client);
-                    }
-                });
-            });
-
-            // Convert to array and take top 10
-            const results = Array.from(clientMap.values()).slice(0, 10);
-
-            setResults(results); // Changed from setSearchResults to setResults
-            return results; // Added return statement
-        } catch (err) {
-            console.error('Quick search error:', err);
-            showError('Search failed'); // Changed from setError to showError
-            setResults([]); // Added to clear results on error
-            return []; // Added return statement
+            const res = await clientsApi.list({ search: searchTerm.trim(), limit: 10 });
+            setResults(res.clients);
+            return res.clients;
+        } catch {
+            showError('Search failed');
+            setResults([]);
+            return [];
         } finally {
             setLoading(false);
         }
-    }, [currentUser, showError]); // Added showError to dependency array
+    }, [currentUser, showError]);
 
     const updateClient = useCallback(async (client: Client) => {
         if (!currentUser) return;
-
         try {
-            await firebaseService.updateClient(currentUser.uid, client);
-            success("Client updated");
-
-            // Update local results if client was in search results
-            setResults(prev =>
-                prev.map(c => c.id === client.id ? client : c)
-            );
-        } catch (err) {
-            showError("Failed to update client");
-            throw err;
+            await clientsApi.update(client);
+            success('Client updated');
+            setResults(prev => prev.map(c => c.id === client.id ? client : c));
+        } catch {
+            showError('Failed to update client');
+            throw new Error('Failed to update client');
         }
     }, [currentUser, success, showError]);
 
@@ -116,6 +51,6 @@ export const useClientQuickSearch = () => {
         loading,
         search,
         updateClient,
-        clearResults
+        clearResults,
     };
 };

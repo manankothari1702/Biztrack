@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
 import { useDashboardData } from '../hooks/useDashboardData';
-import { useAuth } from '../context/AuthContext';
 import { useClients } from '../hooks/useClients';
 import StatsCard from '../components/dashboard/StatsCard';
 import OutreachList from '../components/dashboard/OutreachList';
@@ -35,19 +34,8 @@ const Dashboard: React.FC = () => {
         loadingMoreDue,
         loadingMoreTasks
     } = useDashboardData();
-    const { currentUser } = useAuth();
     const { success, error } = useToast();
 
-    // Data Migration: Normalize Client Names (Runs once)
-    React.useEffect(() => {
-        if (currentUser) {
-            import('../services/migrationService')
-                .then(mod => mod.runDataMigration(currentUser.uid))
-                .catch(() => {
-                    error('Data sync issue', 'Search index update failed. Some search results may be incomplete. This will retry on next load.');
-                });
-        }
-    }, [currentUser]);
 
     const { updateClient } = useClients();
     const [selectedClientForOutcome, setSelectedClientForOutcome] = useState<Client | null>(null);

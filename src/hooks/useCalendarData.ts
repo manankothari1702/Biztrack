@@ -1,70 +1,58 @@
-import { useFirestoreQuery } from './useFirestoreQuery';
-import { where, orderBy } from 'firebase/firestore';
+import { useState, useEffect, useCallback } from 'react';
+import { clientsApi, tasksApi } from '../services/apiService';
+import { useAuth } from '../context/AuthContext';
 import type { Task, Client } from '../types';
 
 export const useCalendarData = (currentDate: Date) => {
-    // Calculate start and end of the current month
+    const { currentUser } = useAuth();
     const year = currentDate.getFullYear();
     const month = currentDate.getMonth();
 
-    // Start of Month: YYYY-MM-01T00:00:00
+    const [tasks, setTasks] = useState<Task[]>([]);
+    const [clients, setClients] = useState<Client[]>([]);
+    const [loading, setLoading] = useState(true);
+
     const startOfMonth = new Date(year, month, 1);
     startOfMonth.setHours(0, 0, 0, 0);
     const startIso = startOfMonth.toISOString();
 
-    // End of Month: Last day at 23:59:59
     const endOfMonth = new Date(year, month + 1, 0);
     endOfMonth.setHours(23, 59, 59, 999);
     const endIso = endOfMonth.toISOString();
 
-    // Tasks Query
-    // Refactored to avoid composite index (Status != Completed + Date Range)
-    // Query: Date Range Only (Single Field Index)
-    const {
-        data: fetchedTasks,
-        loading: loadingTasks,
-        refresh: refreshTasks
-    } = useFirestoreQuery<Task>(
-        'tasks',
-        [
-            where('dueDate', '>=', startIso),
-            where('dueDate', '<=', endIso),
-            orderBy('dueDate', 'asc')
-        ],
-        1000, // Fetch all for month
-        ['calendar-tasks', year, month]
-    );
+    const fetchData = useCallback(async () => {
+        if (!currentUser) return;
+        setLoading(true);
+        try {
+            const [tasksRes, clientsRes] = await Promise.all([
+                tasksApi.list({ limit: 500 }),
+                clientsApi.list({ limit: 500 }),
+            ]);
 
-    const tasks = fetchedTasks.filter(t => t.status !== 'Completed');
+            setTasks(
+                tasksRes.tasks.filter(
+                    t => t.status !== 'Completed' && t.dueDate && t.dueDate >= startIso && t.dueDate <= endIso
+                )
+            );
+            setClients(
+                clientsRes.clients.filter(
+                    c => c.status === 'Active' && c.nextFollowUpDate &&
+                        c.nextFollowUpDate >= startIso && c.nextFollowUpDate <= endIso
+                )
+            );
+        } catch {
+            // Silently fail — calendar is non-critical
+        } finally {
+            setLoading(false);
+        }
+    }, [currentUser, startIso, endIso]);
 
-    // Clients/Calls Query
-    // Refactored to avoid composite index (Status == Active + Date Range)
-    // Query: Date Range Only (Single Field Index)
-    const {
-        data: fetchedClients,
-        loading: loadingClients,
-        refresh: refreshClients
-    } = useFirestoreQuery<Client>(
-        'clients',
-        [
-            where('nextFollowUpDate', '>=', startIso),
-            where('nextFollowUpDate', '<=', endIso),
-            orderBy('nextFollowUpDate', 'asc')
-        ],
-        1000,
-        ['calendar-clients', year, month]
-    );
-
-    const clients = fetchedClients.filter(c => c.status === 'Active');
-
-    const refresh = async () => {
-        await Promise.all([refreshTasks(), refreshClients()]);
-    };
+    useEffect(() => { void fetchData(); }, [fetchData]);
 
     return {
         tasks,
         clients,
-        loading: loadingTasks || loadingClients,
-        refresh
+        loading,
+        refresh: fetchData,
     };
 };

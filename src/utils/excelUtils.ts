@@ -1,7 +1,6 @@
 import ExcelJS from 'exceljs';
 import { parse, isValid } from 'date-fns';
-import type { Client, ClientType, ClientStatus } from '../types';
-import { logger } from './logger';
+import type { Client } from '../types';
 
 const MAX_EXCEL_SIZE_BYTES = 5 * 1024 * 1024; // 5 MB
 const ALLOWED_EXCEL_EXTENSIONS = /\.(xlsx|csv)$/i;
@@ -68,7 +67,7 @@ export const exportClientsToExcel = async (clients: Client[]): Promise<void> => 
     triggerDownload(buffer, `BizTrack_AllClients_${yyyy}-${mm}-${dd}.xlsx`);
 };
 
-const triggerDownload = (buffer: ArrayBuffer | Buffer, fileName: string): void => {
+const triggerDownload = (buffer: ArrayBuffer, fileName: string): void => {
     const blob = new Blob([buffer], {
         type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     });

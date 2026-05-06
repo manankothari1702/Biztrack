@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useData } from '../context/DataContext';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
+import { whatsappApi } from '../services/apiService';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import {
     faUser,
@@ -17,7 +18,11 @@ import {
     faSave,
     faTimes,
     faTrash,
-    faCamera
+    faCamera,
+    faPaperPlane,
+    faToggleOn,
+    faToggleOff,
+    faGlobe
 } from '@fortawesome/free-solid-svg-icons';
 import { faWhatsapp } from '@fortawesome/free-brands-svg-icons';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
@@ -31,7 +36,7 @@ const ALLOWED_PHOTO_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif
 const Profile: React.FC = () => {
     const { userProfile, updateUserProfile } = useData();
     const { success, error: showError, info } = useToast();
-    const { currentUser, resetPassword, updateName, deleteAccount, logout } = useAuth();
+    const { resetPassword, updateName, deleteAccount, logout } = useAuth();
 
     // Inline Editing States
     const [isEditing, setIsEditing] = useState(false);
@@ -50,23 +55,11 @@ const Profile: React.FC = () => {
 
     // Loading / Feedback States
     const [isSaving, setIsSaving] = useState(false);
-    // Removed local message states in favor of toast
+    const [isSendingTest, setIsSendingTest] = useState(false);
 
     // Derived Data
-    const joinDate = currentUser?.metadata.creationTime
-        ? new Date(currentUser.metadata.creationTime).toLocaleDateString(undefined, {
-            year: 'numeric',
-            month: 'long',
-            day: 'numeric'
-        })
-        : 'Unknown';
-
-    const lastLogin = currentUser?.metadata.lastSignInTime
-        ? (() => {
-            const d = new Date(currentUser.metadata.lastSignInTime);
-            return `${d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })} • ${d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}`;
-        })()
-        : 'First Session';
+    const joinDate = 'Unknown';
+    const lastLogin = 'Active Session';
 
     // -- Handlers --
 
@@ -116,7 +109,7 @@ const Profile: React.FC = () => {
         setIsSaving(true);
         try {
             // Update Auth Profile Name if changed
-            if (formData.name !== currentUser?.displayName) {
+            if (formData.name !== userProfile.name) {
                 await updateName(formData.name);
             }
 
@@ -181,20 +174,51 @@ const Profile: React.FC = () => {
     };
 
     const handleReportTimeChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-        const time = e.target.value;
         try {
-            await updateUserProfile({
-                ...userProfile,
-                reportGenerationTime: time
-            });
+            await updateUserProfile({ ...userProfile, reportGenerationTime: e.target.value });
         } catch (err) {
             logger.error("Failed to update report time:", err);
             showError('Update Failed', 'Failed to save report time.');
         }
     };
 
-    const handleTestReport = () => {
-        info('Test Report Triggered', "Report generation test triggered for " + (userProfile.reportGenerationTime || "current time"));
+    const handleToggleReport = async () => {
+        try {
+            await updateUserProfile({ ...userProfile, reportEnabled: !userProfile.reportEnabled });
+        } catch (err) {
+            logger.error("Failed to toggle report:", err);
+            showError('Update Failed', 'Failed to update automation setting.');
+        }
+    };
+
+    const handleTimezoneChange = async (e: React.ChangeEvent<HTMLSelectElement>) => {
+        try {
+            await updateUserProfile({ ...userProfile, timezone: e.target.value });
+        } catch (err) {
+            logger.error("Failed to update timezone:", err);
+            showError('Update Failed', 'Failed to save timezone.');
+        }
+    };
+
+    const handleTestReport = async () => {
+        if (!userProfile.phoneNumber) {
+            showError('No Phone Number', 'Add your WhatsApp number in Contact Number before testing.');
+            return;
+        }
+        if (!userProfile.reportEnabled) {
+            info('Automation Disabled', 'Enable automation first, then test.');
+            return;
+        }
+        setIsSendingTest(true);
+        try {
+            await whatsappApi.sendTest();
+            success('Report Sent', 'Test WhatsApp report delivered to your number.');
+        } catch (err) {
+            logger.error("Test report failed:", err);
+            showError('Send Failed', 'Could not send test report. Check your WhatsApp number and try again.');
+        } finally {
+            setIsSendingTest(false);
+        }
     };
 
     // Avatar Logic
@@ -395,47 +419,116 @@ const Profile: React.FC = () => {
                         </div>
                     </div>
 
-                    {/* 6) Outreach Automation Card (Full Width) */}
+                    {/* 6) Outreach Automation Card */}
                     <div className="bg-white rounded-xl shadow-sm border border-slate-200/60 overflow-hidden">
-                        <div className="px-6 py-4 border-b border-slate-100 bg-slate-50/50 flex flex-col md:flex-row md:items-center justify-between gap-4">
-                            <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest">
-                                Outreach Automation
-                            </h3>
+                        <div className="px-6 py-4 border-b border-slate-100 bg-slate-50/50 flex items-center justify-between">
+                            <div className="flex items-center gap-3">
+                                <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest">
+                                    Outreach Automation
+                                </h3>
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold tracking-wide uppercase bg-purple-100 text-purple-600 border border-purple-200">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-purple-500 animate-pulse"></span>
+                                    Beta
+                                </span>
+                            </div>
+                            {/* Enable / Disable toggle */}
+                            <button
+                                onClick={handleToggleReport}
+                                className={`flex items-center gap-2 text-sm font-bold transition-colors ${userProfile.reportEnabled ? 'text-green-600' : 'text-slate-400'}`}
+                                title={userProfile.reportEnabled ? 'Disable automation' : 'Enable automation'}
+                            >
+                                <FontAwesomeIcon
+                                    icon={userProfile.reportEnabled ? faToggleOn : faToggleOff}
+                                    className="text-2xl"
+                                />
+                                {userProfile.reportEnabled ? 'Enabled' : 'Disabled'}
+                            </button>
                         </div>
-                        <div className="p-6 md:p-8">
-                            <div className="bg-gradient-to-r from-green-50 to-emerald-50 border border-green-100 rounded-xl p-6 mb-6">
-                                <div className="flex items-start gap-4">
-                                    <div className="bg-green-500 text-white rounded-lg p-3 shadow-sm">
-                                        <FontAwesomeIcon icon={faWhatsapp} className="text-2xl" />
-                                    </div>
-                                    <div>
-                                        <h4 className="font-bold text-green-900 text-lg mb-1">Automated Admin Reporting</h4>
-                                        <p className="text-green-800/80 text-sm leading-relaxed max-w-2xl">
-                                            Structured daily agendas containing client names and call descriptions are uniquely prepared for your admin account.
+                        <div className="p-6 md:p-8 space-y-6">
+                            {/* Hero banner */}
+                            <div className="bg-gradient-to-r from-green-50 to-emerald-50 border border-green-100 rounded-xl p-5 flex items-start gap-4">
+                                <div className="bg-green-500 text-white rounded-lg p-3 shadow-sm shrink-0">
+                                    <FontAwesomeIcon icon={faWhatsapp} className="text-2xl" />
+                                </div>
+                                <div>
+                                    <h4 className="font-bold text-green-900 text-base mb-1">Daily WhatsApp Report</h4>
+                                    <p className="text-green-800/80 text-sm leading-relaxed">
+                                        Receive today's due calls and high-priority tasks on WhatsApp every morning. Uses the Contact Number saved in your profile.
+                                    </p>
+                                    {/* Last delivery status */}
+                                    {userProfile.lastReportSentAt && (
+                                        <p className={`mt-2 text-xs font-semibold flex items-center gap-1.5 ${userProfile.lastReportStatus === 'failed' ? 'text-red-500' : 'text-green-600'}`}>
+                                            <FontAwesomeIcon icon={faCheckCircle} />
+                                            Last sent: {new Date(userProfile.lastReportSentAt).toLocaleString()} — {userProfile.lastReportStatus}
                                         </p>
-                                    </div>
+                                    )}
                                 </div>
                             </div>
 
-                            <div className="flex flex-col md:flex-row items-end gap-6 max-w-xl">
-                                <div className="w-full">
-                                    <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Report Generation Time</label>
+                            {/* Beta notice */}
+                            <div className="flex items-start gap-3 rounded-lg border border-purple-200 bg-purple-50 px-4 py-3 text-sm text-purple-800">
+                                <span className="text-purple-500 text-base leading-none mt-0.5">⚗️</span>
+                                <p className="leading-relaxed">
+                                    <span className="font-bold">This feature is in Beta.</span> WhatsApp delivery may occasionally be delayed or fail. Please report any issues so we can improve it before the full release.
+                                </p>
+                            </div>
+
+                            {/* Settings row */}
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                {/* Time picker */}
+                                <div>
+                                    <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">
+                                        Send Time
+                                    </label>
                                     <input
                                         type="time"
-                                        className="w-full p-3 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-green-500/20 focus:border-green-500 text-slate-700 font-semibold cursor-pointer"
+                                        className="w-full p-3 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-green-500/20 focus:border-green-500 text-slate-700 font-semibold cursor-pointer disabled:opacity-50"
                                         value={userProfile.reportGenerationTime || ''}
                                         onChange={handleReportTimeChange}
                                         onClick={(e) => e.currentTarget.showPicker()}
+                                        disabled={!userProfile.reportEnabled}
                                     />
                                 </div>
-                                <div className="w-full md:w-auto">
-                                    <button
-                                        onClick={handleTestReport}
-                                        className="w-full md:w-auto px-6 py-3 bg-white border border-green-200 text-green-700 hover:bg-green-50 font-bold rounded-xl transition-colors shadow-sm whitespace-nowrap"
+
+                                {/* Timezone selector */}
+                                <div>
+                                    <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+                                        <FontAwesomeIcon icon={faGlobe} className="text-slate-400" />
+                                        Timezone
+                                    </label>
+                                    <select
+                                        className="w-full p-3 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-green-500/20 focus:border-green-500 text-slate-700 font-semibold bg-white disabled:opacity-50"
+                                        value={userProfile.timezone || 'Asia/Kolkata'}
+                                        onChange={handleTimezoneChange}
+                                        disabled={!userProfile.reportEnabled}
                                     >
-                                        Test WhatsApp Report
-                                    </button>
+                                        <option value="Asia/Kolkata">India (IST, UTC+5:30)</option>
+                                        <option value="Asia/Dubai">Dubai (GST, UTC+4)</option>
+                                        <option value="Asia/Singapore">Singapore (SGT, UTC+8)</option>
+                                        <option value="Asia/Tokyo">Tokyo (JST, UTC+9)</option>
+                                        <option value="Europe/London">London (GMT/BST)</option>
+                                        <option value="Europe/Paris">Paris (CET, UTC+1)</option>
+                                        <option value="America/New_York">New York (ET)</option>
+                                        <option value="America/Los_Angeles">Los Angeles (PT)</option>
+                                        <option value="America/Chicago">Chicago (CT)</option>
+                                        <option value="Australia/Sydney">Sydney (AEDT, UTC+11)</option>
+                                    </select>
                                 </div>
+                            </div>
+
+                            {/* Test button */}
+                            <div className="flex items-center gap-4 pt-2">
+                                <button
+                                    onClick={handleTestReport}
+                                    disabled={isSendingTest}
+                                    className="flex items-center gap-2 px-6 py-3 bg-white border border-green-200 text-green-700 hover:bg-green-50 font-bold rounded-xl transition-colors shadow-sm disabled:opacity-60 disabled:cursor-not-allowed"
+                                >
+                                    <FontAwesomeIcon icon={isSendingTest ? faClock : faPaperPlane} className={isSendingTest ? 'animate-spin' : ''} />
+                                    {isSendingTest ? 'Sending…' : 'Send Test Report Now'}
+                                </button>
+                                <p className="text-xs text-slate-400">
+                                    Sends immediately to your saved WhatsApp number.
+                                </p>
                             </div>
                         </div>
                     </div>

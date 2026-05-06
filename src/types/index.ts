@@ -20,11 +20,14 @@ export enum OrgLevel {
 export interface User {
   name: string;
   email: string;
-
   level: OrgLevel;
   phoneNumber?: string;
   countryCode?: string;
-  reportGenerationTime?: string;
+  reportGenerationTime?: string;  // HH:MM in user's local timezone
+  reportEnabled?: boolean;
+  timezone?: string;              // IANA tz string e.g. "Asia/Kolkata"
+  lastReportSentAt?: string;      // ISO string
+  lastReportStatus?: 'delivered' | 'failed';
   photoURL?: string;
   avatarColor?: string;
 }

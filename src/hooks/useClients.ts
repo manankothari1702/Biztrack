@@ -1,11 +1,7 @@
-import { useCallback, useMemo, useState, useEffect } from 'react';
-import { orderBy, where, collection, query, getCountFromServer } from 'firebase/firestore';
-import { db } from '../lib/firebase';
-import { useFirestoreQuery } from './useFirestoreQuery';
-import { firebaseService } from '../services/firebaseService';
+import { useCallback, useState, useEffect, useRef } from 'react';
+import { clientsApi } from '../services/apiService';
 import { useAuth } from '../context/AuthContext';
 import type { Client } from '../types';
-import { queryCache } from '../utils/cache';
 
 export const useClients = (
     filterType: 'All' | 'Prospect' | 'User' | 'Associate' | 'Supervisor' = 'All',
@@ -15,311 +11,169 @@ export const useClients = (
     pageSize: number = 50
 ) => {
     const { currentUser } = useAuth();
+    const [clients, setClients] = useState<Client[]>([]);
+    const [totalFetched, setTotalFetched] = useState(0);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
+    const [hasMore, setHasMore] = useState(false);
+    const [nextToken, setNextToken] = useState<string | null>(null);
+    const versionRef = useRef(0);
 
-    // Construct Query Constraints
-    const constraints: import('firebase/firestore').QueryConstraint[] = [];
-
-    // Filter Type
-    if (filterType !== 'All') {
-        constraints.push(where('clientType', '==', filterType));
-    }
-
-    // Search (Prefix)
-    // Search (Prefix)
-    // REFACTOR: Use clientNameLower for case-insensitive search
-    // This relies on the migrationService to have populated this field.
-    if (searchQuery) {
-        const searchLower = searchQuery.toLowerCase().trim();
-        constraints.push(where('clientNameLower', '>=', searchLower));
-        constraints.push(where('clientNameLower', '<=', searchLower + '\uf8ff'));
-        constraints.push(orderBy('clientNameLower', 'asc'));
-    } else {
-        // Sort
-        if (sortBy === 'clientName') {
-            constraints.push(orderBy('clientName', 'asc'));
-        } else {
-            constraints.push(orderBy('nextFollowUpDate', 'asc'));
-        }
-    }
-
-    // Fetch enough data for current page (page * pageSize)
-    // This allows client-side pagination within fetched data
-    const fetchLimit = page * pageSize;
-
-    const { data: allFetchedClients, loading, error, hasMore, refresh } = useFirestoreQuery<Client>(
-        'clients',
-        constraints,
-        fetchLimit,
-        [filterType, searchQuery, sortBy, page] // Include page in dependencies to re-fetch on page change
-    );
-
-    // Slice data for current page (client-side pagination within fetched data)
-    const clients = useMemo(() => {
-        const startIndex = (page - 1) * pageSize;
-        return allFetchedClients.slice(startIndex, startIndex + pageSize);
-    }, [allFetchedClients, page, pageSize]);
-
-    // Calculate total pages based on fetched data
-    const [totalCount, setTotalCount] = useState(0);
-
-    // Track mutations to refresh count reactively
-    const [countVersion, setCountVersion] = useState(0);
-
-    // Effect: Fetch total count when filters change OR after mutations
-    useEffect(() => {
+    const fetchClients = useCallback(async () => {
         if (!currentUser) return;
+        const version = ++versionRef.current;
+        setLoading(true);
+        setError(null);
+        try {
+            const res = await clientsApi.list({
+                clientType: filterType !== 'All' ? filterType : undefined,
+                search: searchQuery || undefined,
+                sortBy,
+                limit: pageSize,
+            });
+            if (version !== versionRef.current) return;
+            setClients(res.clients);
+            setTotalFetched(res.count);
+            setNextToken(res.nextToken);
+            setHasMore(!!res.nextToken);
+        } catch (err) {
+            if (version !== versionRef.current) return;
+            setError(err instanceof Error ? err.message : 'Failed to fetch clients');
+        } finally {
+            if (version === versionRef.current) setLoading(false);
+        }
+    }, [currentUser, filterType, searchQuery, sortBy, pageSize]);
 
-        const fetchCount = async () => {
-            try {
-                const collRef = collection(db, `users/${currentUser.uid}/clients`);
-                const q = query(collRef, ...constraints); // Use same constraints as main query (minus limit/pagination)
-                // Filter out limit/startAfter if they were in constraints (they are not - we build constraints above without them)
+    useEffect(() => { void fetchClients(); }, [fetchClients]);
 
-                // Note: The constraints variable above contains orderBy which is fine for count, 
-                // but if we had limits we would need to remove them. 
-                // Fortunately 'constraints' array defined above only has 'where' and 'orderBy'.
+    const refresh = useCallback(() => { void fetchClients(); }, [fetchClients]);
 
-                const snapshot = await getCountFromServer(q);
-                setTotalCount(snapshot.data().count);
-            } catch (err) {
-                console.error("Failed to fetch client count:", err);
-            }
-        };
-
-        fetchCount();
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [currentUser, filterType, searchQuery, countVersion]); // Re-run when filters change OR after mutations
+    const loadMore = useCallback(async () => {
+        if (!currentUser || !nextToken) return;
+        try {
+            const res = await clientsApi.list({
+                clientType: filterType !== 'All' ? filterType : undefined,
+                search: searchQuery || undefined,
+                sortBy,
+                limit: pageSize,
+                nextToken,
+            });
+            setClients(prev => [...prev, ...res.clients]);
+            setTotalFetched(prev => prev + res.clients.length);
+            setNextToken(res.nextToken);
+            setHasMore(!!res.nextToken);
+        } catch (err) {
+            setError(err instanceof Error ? err.message : 'Failed to load more');
+        }
+    }, [currentUser, nextToken, filterType, searchQuery, sortBy, pageSize]);
 
     const addClient = useCallback(async (client: Client) => {
         if (!currentUser) return;
-
-        try {
-            await firebaseService.addClient(currentUser.uid, client);
-            refresh();
-            setCountVersion(v => v + 1); // Trigger count refresh
-        } catch (err) {
-            throw err;
-        }
+        await clientsApi.add(client);
+        refresh();
     }, [currentUser, refresh]);
 
     const updateClient = useCallback(async (client: Client) => {
         if (!currentUser) return;
-
-        // Key must match what useFirestoreQuery stores: dependencies = [filterType, searchQuery, sortBy, page]
-        const key = queryCache.generateKey('clients', currentUser.uid, { constraints: [filterType, searchQuery, sortBy, page], page: 'first' });
-        const cached = await queryCache.get(key);
-        const previousData = cached ? cached.data : [];
-
-        if (cached) {
-            const updatedData = cached.data.map((c: Client) => c.id === client.id ? client : c);
-            await queryCache.set(key, updatedData, currentUser.uid);
-            refresh();
-        }
-
-        try {
-            await firebaseService.updateClient(currentUser.uid, client);
-        } catch (err) {
-            if (cached) {
-                await queryCache.set(key, previousData, currentUser.uid);
-                refresh();
-            }
-            throw err;
-        }
-    }, [currentUser, refresh, filterType, searchQuery, sortBy, page]);
+        const updated = await clientsApi.update(client);
+        setClients(prev => prev.map(c => c.id === client.id ? updated : c));
+    }, [currentUser]);
 
     const deleteClient = useCallback(async (clientId: string) => {
         if (!currentUser) return;
-
-        // Key must match what useFirestoreQuery stores: dependencies = [filterType, searchQuery, sortBy, page]
-        const key = queryCache.generateKey('clients', currentUser.uid, { constraints: [filterType, searchQuery, sortBy, page], page: 'first' });
-        const cached = await queryCache.get(key);
-        const previousData = cached ? cached.data : [];
-
-        if (cached) {
-            const updatedData = cached.data.filter((c: Client) => c.id !== clientId);
-            await queryCache.set(key, updatedData, currentUser.uid);
-            refresh();
-        }
-
-        try {
-            await firebaseService.deleteClient(currentUser.uid, clientId);
-            setCountVersion(v => v + 1);
-        } catch (err) {
-            if (cached) {
-                await queryCache.set(key, previousData, currentUser.uid);
-                refresh();
-            }
-            throw err;
-        }
-    }, [currentUser, refresh, filterType, searchQuery, sortBy, page]);
+        await clientsApi.delete(clientId);
+        setClients(prev => prev.filter(c => c.id !== clientId));
+        setTotalFetched(prev => Math.max(0, prev - 1));
+    }, [currentUser]);
 
     const bulkDeleteClients = useCallback(async (ids: string[]) => {
         if (!currentUser) return;
-        try {
-            await firebaseService.bulkDeleteClients(currentUser.uid, ids);
-            refresh();
-            setCountVersion(v => v + 1); // Trigger count refresh
-        } catch (err) {
-            throw err;
-        }
+        await clientsApi.bulkDelete(ids);
+        refresh();
     }, [currentUser, refresh]);
 
     const bulkUpdateClients = useCallback(async (ids: string[], updates: Partial<Client>) => {
         if (!currentUser) return;
-        try {
-            await firebaseService.bulkUpdateClients(currentUser.uid, ids, updates);
-            refresh();
-        } catch (err) {
-            throw err;
-        }
-    }, [currentUser, refresh]);
+        // Apply updates locally; server doesn't have a bulk-update endpoint
+        await Promise.all(
+            ids.map(id => {
+                const existing = clients.find(c => c.id === id);
+                if (existing) return clientsApi.update({ ...existing, ...updates });
+                return Promise.resolve();
+            })
+        );
+        refresh();
+    }, [currentUser, clients, refresh]);
 
     const bulkAddClients = useCallback(async (newClients: Client[]) => {
         if (!currentUser) return;
-        try {
-            await firebaseService.bulkAddClients(currentUser.uid, newClients);
-            refresh();
-            setCountVersion(v => v + 1); // Trigger count refresh
-        } catch (err) {
-            throw err;
-        }
+        await clientsApi.bulkAdd(newClients);
+        refresh();
     }, [currentUser, refresh]);
 
+    // Slice for requested page from fetched data
+    const paginatedClients = clients.slice((page - 1) * pageSize, page * pageSize);
+
     return {
-        clients,
-        allClients: allFetchedClients, // Full fetched data for filtering
-        totalFetched: totalCount, // Mapping totalCount to totalFetched for backward compatibility or updating UI to use totalCount
+        clients: paginatedClients,
+        allClients: clients,
+        totalFetched,
         loading,
         error,
         hasMore,
         refresh,
+        loadMore,
         addClient,
         updateClient,
         deleteClient,
         bulkDeleteClients,
         bulkUpdateClients,
-        bulkAddClients
+        bulkAddClients,
     };
 };
 
-// Specialized hook for "Due Today & Overdue" widget
-// Query: status == 'Active' && nextFollowUpDate <= endOfToday
 export const useDueClients = (page: number = 1, pageSize: number = 20, searchQuery: string = '') => {
     const { currentUser } = useAuth();
+    const [allDueClients, setAllDueClients] = useState<Client[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
+    const [hasMore] = useState(false);
 
-    // Use end of today in UTC for comparison
-    // This ensures we catch all clients with dates <= today regardless of timezone
-    const now = new Date();
-    const endOfTodayUtc = new Date(Date.UTC(
-        now.getFullYear(),
-        now.getMonth(),
-        now.getDate(),
-        23, 59, 59, 999
-    )).toISOString();
-
-    // IMPORTANT: Only use single field query to avoid composite index requirement
-    // Query only by date, filter status client-side
-    // OR Query by Name (if searching), then filter Date and Status client-side
-
-    // Determine Query Strategy
-    const isSearch = !!searchQuery.trim();
-    const searchLower = searchQuery.toLowerCase().trim();
-
-    const constraints: import('firebase/firestore').QueryConstraint[] = useMemo(() => {
-        if (isSearch) {
-            // SEARCH STRATEGY:
-            // Query: clientNameLower >= query
-            // Filter: status == 'Active' && nextFollowUpDate <= today
-            return [
-                where('clientNameLower', '>=', searchLower),
-                where('clientNameLower', '<=', searchLower + '\uf8ff'),
-                orderBy('clientNameLower', 'asc')
-            ];
-        } else {
-            // DEFAULT STRATEGY:
-            // Query: nextFollowUpDate <= endOfToday
-            // Filter: status == 'Active'
-            return [
-                where('nextFollowUpDate', '<=', endOfTodayUtc),
-                orderBy('nextFollowUpDate', 'asc') // Ensure sorted by date
-            ];
-        }
-    }, [isSearch, searchLower, endOfTodayUtc]);
-
-    // Fetch Total Count
-    const [totalCount, setTotalCount] = useState(0);
-
-    useEffect(() => {
+    const fetch = useCallback(async () => {
         if (!currentUser) return;
-        const fetchCount = async () => {
-            try {
-                const collRef = collection(db, `users/${currentUser.uid}/clients`);
-                const q = query(collRef, ...constraints);
-                const snapshot = await getCountFromServer(q);
-                setTotalCount(snapshot.data().count);
-            } catch (err) {
-                console.error("Failed to fetch due count:", err);
-            }
-        };
-        fetchCount();
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [currentUser, endOfTodayUtc, isSearch, searchLower]); // Re-run when query changes
-
-    // Fetch Data
-    // If searching, we fetch MORE items because many might not be "Due Today"
-    // We need to fetch enough candidates to fill the page after filtering
-    const effectiveFetchLimit = isSearch ? (page * pageSize * 5) : (page * pageSize);
-
-    const result = useFirestoreQuery<Client>(
-        'clients',
-        constraints,
-        effectiveFetchLimit,
-        ['due-clients', endOfTodayUtc.substring(0, 10), page, isSearch, searchLower] // Include search params in key
-    );
-
-    // Filter/Sort Logic
-    const filteredAndSortedData = useMemo(() => {
-        let processed = result.data.filter(client => client.status === 'Active');
-
-        // If Searching, we still need to filter by Date (since we queried by Name)
-        if (isSearch) {
-            processed = processed.filter(client => {
-                if (!client.nextFollowUpDate) return false;
-                // Simple string comparison for ISO dates works
-                return client.nextFollowUpDate <= endOfTodayUtc;
+        setLoading(true);
+        try {
+            const today = new Date();
+            today.setHours(23, 59, 59, 999);
+            // Fetch clients and filter client-side (API doesn't have a dueClients endpoint)
+            const res = await clientsApi.list({
+                search: searchQuery || undefined,
+                sortBy: 'nextFollowUpDate',
+                limit: 500,
             });
-            // And we should sort by Date for consistency with default view?
-            // Or keep name sort? Default view is sorted by date.
-            // Let's sort by date to match the "Due" context.
-            processed.sort((a, b) => {
-                const dateA = new Date(a.nextFollowUpDate || 0).getTime();
-                const dateB = new Date(b.nextFollowUpDate || 0).getTime();
-                return dateA - dateB;
-            });
-        } else {
-            // Default view: already queried by date, but need to ensure sort if not guaranteed (FireStore guarantees it if orderBy is used)
-            // We added orderBy('nextFollowUpDate') so it should be good.
-            // But existing code did manual sort, let's keep it safe.
-            processed.sort((a, b) => {
-                const dateA = new Date(a.nextFollowUpDate || 0).getTime();
-                const dateB = new Date(b.nextFollowUpDate || 0).getTime();
-                return dateA - dateB;
-            });
+            const todayIso = today.toISOString();
+            const due = res.clients.filter(
+                c => c.status === 'Active' && c.nextFollowUpDate && c.nextFollowUpDate <= todayIso
+            );
+            setAllDueClients(due);
+        } catch (err) {
+            setError(err instanceof Error ? err.message : 'Failed to fetch');
+        } finally {
+            setLoading(false);
         }
+    }, [currentUser, searchQuery]);
 
-        return processed;
-    }, [result.data, isSearch, endOfTodayUtc]);
+    useEffect(() => { void fetch(); }, [fetch]);
 
-    // Slice for pagination
-    const paginatedData = useMemo(() => {
-        const startIndex = (page - 1) * pageSize;
-        return filteredAndSortedData.slice(startIndex, startIndex + pageSize);
-    }, [filteredAndSortedData, page, pageSize]);
+    const data = allDueClients.slice((page - 1) * pageSize, page * pageSize);
 
     return {
-        ...result,
-        data: paginatedData, // Return only current page
-        allDueClients: filteredAndSortedData, // Return all fetched
-        totalFetched: isSearch ? filteredAndSortedData.length : totalCount // For search, true server count is hard, use client count
+        data,
+        allDueClients,
+        totalFetched: allDueClients.length,
+        loading,
+        error,
+        hasMore,
+        refresh: fetch,
     };
 };

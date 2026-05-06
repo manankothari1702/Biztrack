@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx vite *)",
+      "Bash(aws s3 *)",
+      "Bash(aws cloudfront *)"
+    ]
+  }
+}

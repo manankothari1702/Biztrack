@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { useCalendarData } from '../hooks/useCalendarData';
 import { useAuth } from '../context/AuthContext';
-import { firebaseService } from '../services/firebaseService';
+import { tasksApi, clientsApi } from '../services/apiService';
 import { useToast } from '../context/ToastContext';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { faChevronLeft, faChevronRight } from '@fortawesome/free-solid-svg-icons';
@@ -71,7 +71,7 @@ const Calendar: React.FC = () => {
     const handleRescheduleTask = async (task: Task, newDate: string) => {
         if (!currentUser) return;
         try {
-            await firebaseService.updateTask(currentUser.uid, { ...task, dueDate: fromInputDate(newDate) });
+            await tasksApi.update({ ...task, dueDate: fromInputDate(newDate) });
             success('Task Rescheduled', `"${task.title}" rescheduled to ${newDate}`);
             refresh();
         } catch (err) {
@@ -83,7 +83,7 @@ const Calendar: React.FC = () => {
     const handleRescheduleClient = async (client: Client, newDate: string) => {
         if (!currentUser) return;
         try {
-            await firebaseService.updateClient(currentUser.uid, { ...client, nextFollowUpDate: fromInputDate(newDate) });
+            await clientsApi.update({ ...client, nextFollowUpDate: fromInputDate(newDate) });
             success('Follow-Up Rescheduled', `${client.clientName} rescheduled to ${newDate}`);
             refresh();
         } catch (err) {
@@ -95,7 +95,7 @@ const Calendar: React.FC = () => {
     const handleToggleTask = async (task: Task) => {
         if (!currentUser) return;
         try {
-            await firebaseService.updateTask(currentUser.uid, { ...task, status: task.status === 'Completed' ? 'Pending' : 'Completed' });
+            await tasksApi.update({ ...task, status: task.status === 'Completed' ? 'Pending' : 'Completed' });
             refresh();
         } catch (err) {
             logger.error('Failed to toggle task:', err);
