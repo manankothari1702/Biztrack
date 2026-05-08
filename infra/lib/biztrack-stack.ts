@@ -36,8 +36,12 @@ export class BiztrackStack extends cdk.Stack {
             },
             accountRecovery: cognito.AccountRecovery.EMAIL_ONLY,
             standardAttributes: {
-                email: { required: true, mutable: true },
-                fullname: { required: false, mutable: true },
+                email:          { required: true,  mutable: true },
+                fullname:       { required: false, mutable: true },
+                // Required for Google IdP attribute mapping to flow through to Lambda
+                profilePicture: { required: false, mutable: true },
+                givenName:      { required: false, mutable: true },
+                familyName:     { required: false, mutable: true },
             },
             // Custom attributes stored per user
             customAttributes: {
@@ -60,9 +64,11 @@ export class BiztrackStack extends cdk.Stack {
             ),
             scopes: ['email', 'profile', 'openid'],
             attributeMapping: {
-                email: cognito.ProviderAttribute.GOOGLE_EMAIL,
-                fullname: cognito.ProviderAttribute.GOOGLE_NAME,
+                email:          cognito.ProviderAttribute.GOOGLE_EMAIL,
+                fullname:       cognito.ProviderAttribute.GOOGLE_NAME,
                 profilePicture: cognito.ProviderAttribute.GOOGLE_PICTURE,
+                givenName:      cognito.ProviderAttribute.GOOGLE_GIVEN_NAME,
+                familyName:     cognito.ProviderAttribute.GOOGLE_FAMILY_NAME,
             },
         });
 

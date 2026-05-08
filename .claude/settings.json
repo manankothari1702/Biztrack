@@ -3,7 +3,10 @@
     "allow": [
       "Bash(npx vite *)",
       "Bash(aws s3 *)",
-      "Bash(aws cloudfront *)"
+      "Bash(aws cloudfront *)",
+      "Bash(powershell -Command \"Compress-Archive -Path dist,node_modules -DestinationPath lambda.zip -Force\")",
+      "Bash(aws lambda *)",
+      "Bash(del lambda.zip)"
     ]
   }
 }

@@ -1,20 +1,19 @@
 import React from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
-import { AuthProvider } from './context/AuthContext';
-import { DataProvider } from './context/DataContext';
-import { ToastProvider } from './context/ToastContext';
-import ErrorBoundary from './components/common/ErrorBoundary';
-import ToastContainer from './components/common/ToastContainer';
-import PrivateRoute from './components/PrivateRoute';
-import CompleteProfileModal from './components/common/CompleteProfileModal';
-import Login from './pages/Login';
-import Dashboard from './pages/Dashboard';
+import { AuthProvider } from './features/auth/context/AuthContext';
+import { DataProvider } from './shared/context/DataContext';
+import { ToastProvider } from './shared/context/ToastContext';
+import ErrorBoundary from './shared/components/common/ErrorBoundary';
+import ToastContainer from './shared/components/common/ToastContainer';
+import PrivateRoute from './features/auth/components/PrivateRoute';
+import Login from './features/auth/pages/Login';
+import Dashboard from './features/dashboard/pages/Dashboard';
 import NotFound from './pages/NotFound';
-import Tasks from './pages/Tasks';
-import Clients from './pages/Clients';
-import Calendar from './pages/Calendar';
-import Team from './pages/Team';
-import Profile from './pages/Profile';
+import Tasks from './features/tasks/pages/Tasks';
+import Clients from './features/clients/pages/Clients';
+import Calendar from './features/calendar/pages/Calendar';
+import Team from './features/team/pages/Team';
+import Profile from './features/profile/pages/Profile';
 
 const App: React.FC = () => {
   return (
@@ -22,8 +21,7 @@ const App: React.FC = () => {
       <AuthProvider>
         <ToastProvider>
           <DataProvider>
-            <CompleteProfileModal />
-            <Router>
+<Router>
               <Routes>
                 <Route path="/login" element={<Login />} />
 

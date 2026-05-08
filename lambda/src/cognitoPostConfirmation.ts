@@ -8,33 +8,47 @@ interface CognitoEvent {
 }
 
 export const handler = async (event: CognitoEvent): Promise<CognitoEvent> => {
-    // Fires on email confirmation AND on first federated (Google) sign-in
+    // Fires on email confirmation AND on first federated (Google) sign-in.
+    // For Google users the trigger source is still PostConfirmation_ConfirmSignUp.
     if (event.triggerSource !== 'PostConfirmation_ConfirmSignUp') return event;
 
-    const { sub, email, name, picture } = event.request.userAttributes;
+    const attrs = event.request.userAttributes;
+    const sub   = attrs['sub'];
     if (!sub) return event;
+
+    const email = attrs['email'] ?? '';
+
+    // Google sends display name as `name`; fall back to given+family, then email local-part
+    const displayName =
+        attrs['name'] ||
+        [attrs['given_name'], attrs['family_name']].filter(Boolean).join(' ').trim() ||
+        email.split('@')[0];
+
+    // `picture` is enabled as a standard Cognito attribute and mapped from Google IdP
+    const photoURL = attrs['picture'] ?? '';
+    const isGoogle = !!attrs['identities'] || photoURL !== '';
 
     try {
         await db.send(new PutCommand({
             TableName: TABLE,
             Item: {
                 ...keys.profile(sub),
-                email:     email   ?? '',
-                name:      name    ?? '',
-                photoURL:  picture ?? '',
-                level:     'Root',
-                provider:  picture ? 'google' : 'email',
+                email,
+                name:      displayName,
+                photoURL,
+                level:     'Supervisor',
+                provider:  isGoogle ? 'google' : 'email',
                 createdAt: new Date().toISOString(),
             },
             // Idempotent — never overwrite an existing profile
             ConditionExpression: 'attribute_not_exists(PK)',
         }));
     } catch (err: unknown) {
-        // ConditionalCheckFailedException means profile already exists — that's fine
-        const name = (err as { name?: string }).name ?? '';
-        if (name !== 'ConditionalCheckFailedException') {
+        // ConditionalCheckFailedException means profile already exists — fine
+        const errName = (err as { name?: string }).name ?? '';
+        if (errName !== 'ConditionalCheckFailedException') {
             console.error('PostConfirmation trigger error:', err);
-            // Don't throw — Cognito would block sign-in if the trigger fails
+            // Don't throw — a Lambda error here would block the user from signing in
         }
     }
 
