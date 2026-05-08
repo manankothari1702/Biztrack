@@ -161,8 +161,8 @@ const ClientModal: React.FC<ClientModalProps> = ({ isOpen, onClose, onSave, init
             // lastContactDate is inherited from ...initialClient if present, otherwise undefined and effectively omitted because we won't explicitly add it as undefined.
             // WAIT. If I remove it, and it's NOT in initialClient (e.g. new client), it won't be in newClient.
             // But verify: logic below `newClient` definition uses `as Client`.
-            // Does Firestore care if key is missing? No.
-            // Does Firestore care if key is present but value undefined? Yes.
+            // DynamoDB ignores missing keys, but undefined values must not be sent.
+            // Omitting the explicit assignment is the correct approach here.
             // So removing the explicit assignment is the fix.
             createdAt: initialClient?.createdAt || new Date().toISOString(),
         } as Client;

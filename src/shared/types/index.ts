@@ -64,7 +64,7 @@ export interface Client {
   createdAt: string; // New ISO Date string
 }
 
-// Flat shape stored in Firestore — no children array
+// Flat shape stored in DynamoDB — no children array
 export interface FlatOrgNode {
   id: string;
   name: string;
@@ -73,7 +73,7 @@ export interface FlatOrgNode {
   parentId: string | null;
 }
 
-// In-memory tree shape built by buildOrgTree — never written to Firestore
+// In-memory tree shape built by buildOrgTree — never persisted directly
 export interface OrgNode extends FlatOrgNode {
   children: OrgNode[];
 }

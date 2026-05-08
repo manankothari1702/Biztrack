@@ -315,7 +315,7 @@ export const validateClientRow = (row: Record<string, unknown>, existingClients:
 
     // -- 7. Construct Client --
     // Never reuse duplicateOfId as the new client's id — that would overwrite the
-    // existing client in Firestore. duplicateOfId in the return value is enough
+    // existing record. duplicateOfId in the return value is enough
     // for the caller to decide whether to skip or merge this row.
     const client: Client = {
         id:               getId() ? String(getId()) : crypto.randomUUID(),

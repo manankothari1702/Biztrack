@@ -115,7 +115,6 @@ const Profile: React.FC = () => {
                 await updateName(formData.name);
             }
 
-            // Update Firestore Profile
             await updateUserProfile({
                 ...userProfile,
                 name: formData.name,

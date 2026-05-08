@@ -6,7 +6,8 @@
       "Bash(aws cloudfront *)",
       "Bash(powershell -Command \"Compress-Archive -Path dist,node_modules -DestinationPath lambda.zip -Force\")",
       "Bash(aws lambda *)",
-      "Bash(del lambda.zip)"
+      "Bash(del lambda.zip)",
+      "Bash(xargs grep *)"
     ]
   }
 }

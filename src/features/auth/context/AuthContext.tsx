@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
 import {
-    signUp, signIn, signOut, signInWithRedirect,
+    signUp, signIn, signOut,
     resetPassword as amplifyResetPassword,
     updateUserAttributes, updatePassword,
     fetchAuthSession, getCurrentUser, fetchUserAttributes,
@@ -16,7 +16,6 @@ interface AuthContextType {
     loading: boolean;
     signup:              (email: string, password: string, name: string) => Promise<void>;
     login:               (email: string, password: string) => Promise<void>;
-    googleSignIn:        () => Promise<void>;
     logout:              () => Promise<void>;
     resetPassword:       (email: string) => Promise<void>;
     updateName:          (name: string) => Promise<void>;
@@ -28,19 +27,6 @@ interface AuthContextType {
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
-
-// Removes stale PKCE / OAuth keys Amplify leaves in localStorage after an
-// interrupted OAuth flow. Without this, the next attempt hits a state mismatch.
-function clearOAuthState() {
-    const keysToRemove = Object.keys(localStorage).filter(k =>
-        k.startsWith('amplify-') ||
-        k.includes('oauth') ||
-        k.includes('PKCE') ||
-        k.includes('pkce') ||
-        k.includes('signInWith')
-    );
-    keysToRemove.forEach(k => localStorage.removeItem(k));
-}
 
 // ── Provider ────────────────────────────────────────────────────────────────
 
@@ -60,26 +46,14 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     };
 
     useEffect(() => {
-        // Always call resolveUser() on mount.
-        // In Amplify v6, getCurrentUser() is what TRIGGERS OAuth callback processing —
-        // it detects ?code&state in the URL, exchanges the code for tokens, then returns
-        // the user. Skipping this call would leave the callback unprocessed.
-        // PrivateRoute shows a spinner while loading=true, so there is no premature
-        // redirect to /login while the async token exchange is in flight.
         resolveUser();
 
         const unsubscribe = Hub.listen('auth', ({ payload }) => {
             switch (payload.event) {
                 case 'signedIn':
-                case 'signInWithRedirect': // fires after Amplify completes the OAuth code exchange
                     resolveUser();
                     break;
                 case 'signedOut':
-                    setCurrentUser(null);
-                    setLoading(false);
-                    break;
-                case 'signInWithRedirect_failure':
-                    console.error('[Auth] OAuth redirect failed:', payload.data);
                     setCurrentUser(null);
                     setLoading(false);
                     break;
@@ -102,14 +76,6 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     const handleLogin = async (email: string, password: string) => {
         await signIn({ username: email, password });
         await resolveUser();
-    };
-
-    const handleGoogleSignIn = async () => {
-        // Clear any stale PKCE / OAuth state from previous incomplete flows.
-        // Leftover keys cause "state mismatch" errors on subsequent attempts,
-        // which is why the flow only worked in incognito (clean storage).
-        clearOAuthState();
-        await signInWithRedirect({ provider: 'Google' });
     };
 
     const handleLogout = async () => {
@@ -162,7 +128,6 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
             loading,
             signup:             handleSignup,
             login:              handleLogin,
-            googleSignIn:       handleGoogleSignIn,
             logout:             handleLogout,
             resetPassword:      handleResetPassword,
             updateName:         handleUpdateName,
