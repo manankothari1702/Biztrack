@@ -6,10 +6,7 @@ import Layout from '../../../shared/components/layout/Layout';
 const PrivateRoute: React.FC = () => {
     const { currentUser, loading } = useAuth();
 
-    // Wait for auth to resolve before redirecting — critical for OAuth callbacks.
-    // After Google sign-in, Cognito returns to this route with ?code=...&state=...
-    // Amplify must process those params before we know if the user is authenticated.
-    // Redirecting to /login while loading=true strips the query params and kills the flow.
+    // Wait for Cognito to resolve the current user before deciding to redirect.
     if (loading) {
         return (
             <div className="min-h-screen flex items-center justify-center bg-slate-50">

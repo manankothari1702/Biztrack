@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useDashboardData } from '../hooks/useDashboardData';
-import { useClients } from '../../clients/hooks/useClients';
+import { clientsApi } from '../../../shared/services/apiService';
 import StatsCard from '../components/StatsCard';
 import OutreachList from '../components/OutreachList';
 import PriorityTaskList from '../components/PriorityTaskList';
@@ -37,7 +37,8 @@ const Dashboard: React.FC = () => {
     const { success, error } = useToast();
 
 
-    const { updateClient } = useClients();
+    // Call clientsApi.update directly — mounting useClients() here would trigger a full
+    // client-DB exhaustion on every dashboard view just to obtain an updater (audit B1).
     const [selectedClientForOutcome, setSelectedClientForOutcome] = useState<Client | null>(null);
     const [bannerDismissed, setBannerDismissed] = useState(false);
 
@@ -82,7 +83,7 @@ const Dashboard: React.FC = () => {
         }
 
         try {
-            await updateClient(updatedClient);
+            await clientsApi.update(updatedClient);
             success('Follow-Up Logged', 'Client status has been updated successfully.');
             refresh();
             setSelectedClientForOutcome(null);

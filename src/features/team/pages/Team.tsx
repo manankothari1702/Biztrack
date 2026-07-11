@@ -12,27 +12,6 @@ import { logger } from '../../../shared/utils/logger';
 
 import { ConfirmationModal } from '../../../shared/components/common/ConfirmationModal';
 
-const collectDescendantIds = (node: OrgNode): string[] => {
-    let ids: string[] = [node.id];
-    if (node.children) {
-        node.children.forEach(child => {
-            ids = ids.concat(collectDescendantIds(child));
-        });
-    }
-    return ids;
-};
-
-const findNodeById = (root: OrgNode, id: string): OrgNode | null => {
-    if (root.id === id) return root;
-    if (root.children) {
-        for (const child of root.children) {
-            const found = findNodeById(child, id);
-            if (found) return found;
-        }
-    }
-    return null;
-};
-
 const Team: React.FC = () => {
     const { orgTree, userProfile, addOrgNode, updateOrgNode, deleteOrgNode } = useData();
     const { success, error } = useToast();
@@ -83,18 +62,14 @@ const Team: React.FC = () => {
     };
 
     const handleConfirmDelete = async () => {
-        if (!deleteNodeId || !orgTree) return;
+        if (!deleteNodeId) return;
 
         setIsDeleting(true);
         try {
-            // Find node to get all descendants
-            const nodeToDelete = findNodeById(orgTree, deleteNodeId);
-            if (nodeToDelete) {
-                const idsToDelete = collectDescendantIds(nodeToDelete);
-                // Delete one by one (Promise.all would be faster)
-                await Promise.all(idsToDelete.map(id => deleteOrgNode(id)));
-                success('Node Deleted', 'Team member and subordinates removed.');
-            }
+            // One call — the server deletes the whole subtree (audit B3). No client-side
+            // recursion / Promise.all, which orphaned subtrees on a mid-way failure.
+            await deleteOrgNode(deleteNodeId);
+            success('Node Deleted', 'Team member and subordinates removed.');
         } catch (err) {
             logger.error("Error deleting node:", err);
             error('Delete Failed', "Failed to delete node. Please try again.");

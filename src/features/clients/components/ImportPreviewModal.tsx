@@ -12,7 +12,6 @@ import {
 } from '@fortawesome/free-solid-svg-icons';
 import type { Client } from '../../../shared/types';
 import { validateClientRow, type ValidationResult, exportToExcel } from '../../../shared/utils/excelUtils';
-import { useClients } from '../hooks/useClients';
 import { useToast } from '../../../shared/context/ToastContext';
 import { toInputDate, fromInputDate } from '../../../shared/utils/dateUtils';
 import { logger } from '../../../shared/utils/logger';
@@ -24,6 +23,7 @@ interface ImportPreviewModalProps {
     fileData: Record<string, unknown>[]; // Raw data from Excel
     existingClients: Client[];
     onImportComplete: () => void;
+    bulkAddClients: (clients: Client[]) => Promise<void>;
 }
 
 type RowAction = 'Import' | 'Skip' | 'Update';
@@ -34,9 +34,7 @@ interface ProcessedRow extends ValidationResult {
     changedFields?: string[];
 }
 
-const ImportPreviewModal: React.FC<ImportPreviewModalProps> = ({ isOpen, onClose, fileData, existingClients, onImportComplete }) => {
-    // Migration: Using hook-based data access instead of DataContext
-    const { bulkAddClients } = useClients();
+const ImportPreviewModal: React.FC<ImportPreviewModalProps> = ({ isOpen, onClose, fileData, existingClients, onImportComplete, bulkAddClients }) => {
     const { error: showError } = useToast();
     const [rows, setRows] = useState<ProcessedRow[]>([]);
     const [searchQuery, setSearchQuery] = useState('');

@@ -24,22 +24,41 @@ export const useCalendarData = (currentDate: Date) => {
         if (!currentUser) return;
         setLoading(true);
         try {
-            const [tasksRes, clientsRes] = await Promise.all([
-                tasksApi.list({ limit: 500 }),
-                clientsApi.list({ limit: 500 }),
+            // Server-scoped, month-bounded, paginated to completeness (audit B1). Replaces
+            // the old single-page limit:500 (server-capped to 200) + client-side filter,
+            // which silently dropped month items beyond the first page. New queries return
+            // the full month regardless of total record count.
+            const [monthTasks, monthClients] = await Promise.all([
+                (async () => {
+                    const out: Task[] = [];
+                    let token: string | null = null;
+                    do {
+                        const res = await tasksApi.list({
+                            from: startIso, to: endIso, excludeCompleted: '1',
+                            limit: 500, ...(token ? { nextToken: token } : {}),
+                        });
+                        out.push(...res.tasks);
+                        token = res.nextToken;
+                    } while (token);
+                    return out;
+                })(),
+                (async () => {
+                    const out: Client[] = [];
+                    let token: string | null = null;
+                    do {
+                        const res = await clientsApi.list({
+                            dueFrom: startIso, dueBefore: endIso, status: 'Active',
+                            limit: 500, ...(token ? { nextToken: token } : {}),
+                        });
+                        out.push(...res.clients);
+                        token = res.nextToken;
+                    } while (token);
+                    return out;
+                })(),
             ]);
 
-            setTasks(
-                tasksRes.tasks.filter(
-                    t => t.status !== 'Completed' && t.dueDate && t.dueDate >= startIso && t.dueDate <= endIso
-                )
-            );
-            setClients(
-                clientsRes.clients.filter(
-                    c => c.status === 'Active' && c.nextFollowUpDate &&
-                        c.nextFollowUpDate >= startIso && c.nextFollowUpDate <= endIso
-                )
-            );
+            setTasks(monthTasks);
+            setClients(monthClients);
         } catch {
             // Silently fail — calendar is non-critical
         } finally {

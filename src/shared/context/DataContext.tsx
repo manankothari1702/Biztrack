@@ -174,8 +174,13 @@ export const DataProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     const deleteOrgNode = useCallback(async (nodeId: string) => {
         if (!currentUser) throw new Error('User not authenticated');
         try {
-            await userApi.deleteOrgNode(nodeId);
-            setOrgNodes(prev => prev.filter(n => n.id !== nodeId));
+            // Server removes the whole subtree in one call and returns the confirmed-deleted
+            // ids; drop exactly those locally (poll reconciles any partial-failure remainder).
+            const { deletedIds } = await userApi.deleteOrgNode(nodeId);
+            if (deletedIds.length) {
+                const removed = new Set(deletedIds);
+                setOrgNodes(prev => prev.filter(n => !removed.has(n.id)));
+            }
         } catch (error) {
             logger.error('Error deleting org node:', error);
             throw error;

@@ -8,6 +8,11 @@ import {
 } from 'aws-amplify/auth';
 import { Hub } from 'aws-amplify/utils';
 import '../../../shared/lib/aws'; // initialise Amplify config
+import { PENDING_DELETION_EVENT, type PendingDeletionDetail } from '../../../shared/services/apiService';
+
+// sessionStorage key used to relay the pending-deletion message from the
+// signed-out tab through to the Login page that picks it up on mount.
+export const PENDING_DELETION_STORAGE_KEY = 'biztrack.pendingDeletionMessage';
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -60,7 +65,23 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
             }
         });
 
-        return unsubscribe;
+        // When any API call returns 403 ACCOUNT_PENDING_DELETION, sign the user
+        // out immediately and stash the message for the Login page to display.
+        const onPendingDeletion = (event: Event) => {
+            const detail = (event as CustomEvent<PendingDeletionDetail>).detail;
+            try {
+                sessionStorage.setItem(PENDING_DELETION_STORAGE_KEY, detail.message);
+            } catch {
+                // sessionStorage may be unavailable (private mode); fall through.
+            }
+            void signOut().catch(() => { /* already signed out is fine */ });
+        };
+        window.addEventListener(PENDING_DELETION_EVENT, onPendingDeletion);
+
+        return () => {
+            unsubscribe();
+            window.removeEventListener(PENDING_DELETION_EVENT, onPendingDeletion);
+        };
     }, []);
 
     // ── Auth actions ──────────────────────────────────────────────────────
@@ -101,9 +122,13 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
 
     const handleDeleteAccount = async () => {
         const { userApi } = await import('../../../shared/services/apiService');
-        const profile = await userApi.getProfile();
-        await userApi.updateProfile({ ...profile, deletionRequested: true } as never);
+        // Backend flips accountStatus → PENDING_DELETION, sets purgeAt (+7d),
+        // and revokes Cognito refresh tokens. We sign out locally as a courtesy
+        // so the next request from this tab doesn't 403 — but the guard is the
+        // real enforcement, not this client-side signOut.
+        await userApi.deleteAccount();
         await signOut();
+        setCurrentUser(null);
     };
 
     const getUserAttributes = async (): Promise<{ email?: string; name?: string; picture?: string }> => {

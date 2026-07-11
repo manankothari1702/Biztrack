@@ -1,11 +1,16 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { db, TABLE } from './lib/db';
-import { ok, serverError, getUid } from './lib/response';
+import { ok, serverError, getUid, resolveCors } from './lib/response';
+import { guardAccount } from './lib/accountGuard';
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
     try {
+        resolveCors(event);
         const uid = getUid(event);
+        const { blocked } = await guardAccount(uid);
+        if (blocked) return blocked;
+
         const now = new Date();
 
         const todayEnd = new Date(now);

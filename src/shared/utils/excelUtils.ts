@@ -9,12 +9,25 @@ const ALLOWED_EXCEL_EXTENSIONS = /\.(xlsx|csv)$/i;
 // EXPORTS
 // ==========================================
 
+// Prevent CSV/formula injection when the exported file is opened in a spreadsheet: a cell
+// beginning with = + - @ (or a leading tab/CR) can be executed as a formula. Prefix such
+// values with a single quote so they render as literal text. Export-only, and a no-op for
+// normal data (which never starts with those characters).
+const csvSafe = (v: unknown): unknown => {
+    if (typeof v !== 'string' || v.length === 0) return v;
+    return /^[=+\-@\t\r]/.test(v) ? `'${v}` : v;
+};
+
 export const exportToExcel = async (data: Record<string, unknown>[], fileName: string): Promise<void> => {
     const workbook = new ExcelJS.Workbook();
     const worksheet = workbook.addWorksheet('Sheet1');
     if (data.length > 0) {
         worksheet.columns = Object.keys(data[0]).map(key => ({ header: key, key, width: 20 }));
-        data.forEach(row => worksheet.addRow(row));
+        data.forEach(row => {
+            const safe: Record<string, unknown> = {};
+            for (const k of Object.keys(row)) safe[k] = csvSafe(row[k]);
+            worksheet.addRow(safe);
+        });
     }
     const buffer = await workbook.xlsx.writeBuffer();
     triggerDownload(buffer, `${fileName}.xlsx`);
@@ -45,16 +58,16 @@ export const exportClientsToExcel = async (clients: Client[]): Promise<void> => 
 
     sortedClients.forEach(client => {
         worksheet.addRow({
-            id:               client.id || '',
-            clientName:       client.clientName || '',
-            mobile:           client.mobile ? String(client.mobile) : '',
-            email:            client.email || '',
-            clientType:       client.clientType || '',
-            status:           client.status || '',
-            nextFollowUpDate: formatDate(client.nextFollowUpDate),
-            frequency:        client.frequency || '',
-            notes:            client.notes || '',
-            createdAt:        formatDate(client.createdAt),
+            id:               csvSafe(client.id || ''),
+            clientName:       csvSafe(client.clientName || ''),
+            mobile:           csvSafe(client.mobile ? String(client.mobile) : ''),
+            email:            csvSafe(client.email || ''),
+            clientType:       csvSafe(client.clientType || ''),
+            status:           csvSafe(client.status || ''),
+            nextFollowUpDate: formatDate(client.nextFollowUpDate), // system-formatted date — safe
+            frequency:        csvSafe(client.frequency || ''),
+            notes:            csvSafe(client.notes || ''),
+            createdAt:        formatDate(client.createdAt),         // system-formatted date — safe
         });
     });
 

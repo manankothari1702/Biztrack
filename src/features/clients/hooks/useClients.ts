@@ -16,7 +16,6 @@ export const useClients = (
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [hasMore, setHasMore] = useState(false);
-    const [nextToken, setNextToken] = useState<string | null>(null);
     const versionRef = useRef(0);
 
     const fetchClients = useCallback(async () => {
@@ -25,17 +24,27 @@ export const useClients = (
         setLoading(true);
         setError(null);
         try {
-            const res = await clientsApi.list({
-                clientType: filterType !== 'All' ? filterType : undefined,
-                search: searchQuery || undefined,
-                sortBy,
-                limit: pageSize,
-            });
+            // Exhaust all pages so totalFetched and pagination reflect the true count.
+            // DynamoDB's Count is per-page, so we must aggregate across nextToken pages.
+            const accumulated: Client[] = [];
+            let token: string | null = null;
+            do {
+                const res = await clientsApi.list({
+                    clientType: filterType !== 'All' ? filterType : undefined,
+                    search: searchQuery || undefined,
+                    sortBy,
+                    limit: pageSize,
+                    ...(token ? { nextToken: token } : {}),
+                });
+                if (version !== versionRef.current) return;
+                accumulated.push(...res.clients);
+                token = res.nextToken;
+            } while (token);
+
             if (version !== versionRef.current) return;
-            setClients(res.clients);
-            setTotalFetched(res.count);
-            setNextToken(res.nextToken);
-            setHasMore(!!res.nextToken);
+            setClients(accumulated);
+            setTotalFetched(accumulated.length);
+            setHasMore(false);
         } catch (err) {
             if (version !== versionRef.current) return;
             setError(err instanceof Error ? err.message : 'Failed to fetch clients');
@@ -47,25 +56,6 @@ export const useClients = (
     useEffect(() => { void fetchClients(); }, [fetchClients]);
 
     const refresh = useCallback(() => { void fetchClients(); }, [fetchClients]);
-
-    const loadMore = useCallback(async () => {
-        if (!currentUser || !nextToken) return;
-        try {
-            const res = await clientsApi.list({
-                clientType: filterType !== 'All' ? filterType : undefined,
-                search: searchQuery || undefined,
-                sortBy,
-                limit: pageSize,
-                nextToken,
-            });
-            setClients(prev => [...prev, ...res.clients]);
-            setTotalFetched(prev => prev + res.clients.length);
-            setNextToken(res.nextToken);
-            setHasMore(!!res.nextToken);
-        } catch (err) {
-            setError(err instanceof Error ? err.message : 'Failed to load more');
-        }
-    }, [currentUser, nextToken, filterType, searchQuery, sortBy, pageSize]);
 
     const addClient = useCallback(async (client: Client) => {
         if (!currentUser) return;
@@ -122,7 +112,6 @@ export const useClients = (
         error,
         hasMore,
         refresh,
-        loadMore,
         addClient,
         updateClient,
         deleteClient,
@@ -145,16 +134,25 @@ export const useDueClients = (page: number = 1, pageSize: number = 20, searchQue
         try {
             const today = new Date();
             today.setHours(23, 59, 59, 999);
-            // Fetch clients and filter client-side (API doesn't have a dueClients endpoint)
-            const res = await clientsApi.list({
-                search: searchQuery || undefined,
-                sortBy: 'nextFollowUpDate',
-                limit: 500,
-            });
-            const todayIso = today.toISOString();
-            const due = res.clients.filter(
-                c => c.status === 'Active' && c.nextFollowUpDate && c.nextFollowUpDate <= todayIso
-            );
+            const dueBefore = today.toISOString(); // end of LOCAL today — identical cutoff to before
+
+            // Server-scoped due query (audit B1): GSI1 nextFollowUpDate <= dueBefore + Active,
+            // instead of pulling the whole client DB and filtering locally. Still paginate to
+            // completeness — but over the (small) due-candidate set, not every client.
+            const due: Client[] = [];
+            let token: string | null = null;
+            do {
+                const res = await clientsApi.list({
+                    dueBefore,
+                    status: 'Active',
+                    search: searchQuery || undefined,
+                    limit: 200,
+                    ...(token ? { nextToken: token } : {}),
+                });
+                due.push(...res.clients);
+                token = res.nextToken;
+            } while (token);
+
             setAllDueClients(due);
         } catch (err) {
             setError(err instanceof Error ? err.message : 'Failed to fetch');

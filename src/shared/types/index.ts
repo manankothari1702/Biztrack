@@ -17,6 +17,8 @@ export enum OrgLevel {
   Founder = 'Founder Circle',
 }
 
+export type AccountStatus = 'ACTIVE' | 'PENDING_DELETION';
+
 export interface User {
   name: string;
   email: string;
@@ -31,6 +33,16 @@ export interface User {
   photoURL?: string;
   avatarColor?: string;
   createdAt?: string;       // ISO string — set by PostConfirmation Lambda or auto-provision
+  // Soft-delete state. Managed exclusively by the backend; never set via PUT /user.
+  accountStatus?: AccountStatus;
+  deletedAt?: string | null;
+  purgeAt?: string | null;
+}
+
+export interface AccountDeletionResponse {
+  accountStatus: 'PENDING_DELETION';
+  deletedAt: string;
+  purgeAt: string;
 }
 
 export interface Task {

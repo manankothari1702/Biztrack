@@ -8,8 +8,7 @@ interface CognitoEvent {
 }
 
 export const handler = async (event: CognitoEvent): Promise<CognitoEvent> => {
-    // Fires on email confirmation AND on first federated (Google) sign-in.
-    // For Google users the trigger source is still PostConfirmation_ConfirmSignUp.
+    // Fires after a user confirms their email at sign-up.
     if (event.triggerSource !== 'PostConfirmation_ConfirmSignUp') return event;
 
     const attrs = event.request.userAttributes;
@@ -17,16 +16,7 @@ export const handler = async (event: CognitoEvent): Promise<CognitoEvent> => {
     if (!sub) return event;
 
     const email = attrs['email'] ?? '';
-
-    // Google sends display name as `name`; fall back to given+family, then email local-part
-    const displayName =
-        attrs['name'] ||
-        [attrs['given_name'], attrs['family_name']].filter(Boolean).join(' ').trim() ||
-        email.split('@')[0];
-
-    // `picture` is enabled as a standard Cognito attribute and mapped from Google IdP
-    const photoURL = attrs['picture'] ?? '';
-    const isGoogle = !!attrs['identities'] || photoURL !== '';
+    const displayName = attrs['name'] || email.split('@')[0];
 
     try {
         await db.send(new PutCommand({
@@ -35,9 +25,8 @@ export const handler = async (event: CognitoEvent): Promise<CognitoEvent> => {
                 ...keys.profile(sub),
                 email,
                 name:      displayName,
-                photoURL,
                 level:     'Supervisor',
-                provider:  isGoogle ? 'google' : 'email',
+                provider:  'email',
                 createdAt: new Date().toISOString(),
             },
             // Idempotent — never overwrite an existing profile

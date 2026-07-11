@@ -35,21 +35,22 @@ const Clients: React.FC = () => {
     // Using hook-based data access with page-based pagination
     const {
         clients,
-        // clients is now the data for the current page
         loading: clientsLoading,
-        totalFetched, // This is now the real total count from server
+        totalFetched,
+        refresh: refreshClients,
         addClient,
         updateClient,
         deleteClient,
         bulkDeleteClients,
         bulkUpdateClients,
+        bulkAddClients,
     } = useClients(filterType, searchQuery, sortField, currentPage, ITEMS_PER_PAGE);
 
     // Separate hook for due clients (optimized query), now with server-side pagination & search
     const {
-        data: dueClients, // Data is now already filtered/sorted/paginated by hook
-        // loading: dueLoading,
-        totalFetched: totalDueCount
+        data: dueClients,
+        totalFetched: totalDueCount,
+        refresh: refreshDueClients,
     } = useDueClients(currentCardsPage, CARDS_PER_PAGE, followUpSearchQuery);
 
     const { success, error } = useToast();
@@ -126,6 +127,7 @@ const Clients: React.FC = () => {
                 success('Client Added', `${client.clientName} has been added successfully.`);
             }
             setEditingClient(null);
+            refreshDueClients();
         } catch (err) {
             logger.error('Client operation failed:', err);
             error('Operation Failed', editingClient ? 'Failed to update client. Please try again.' : 'Failed to add client. Please try again.');
@@ -361,7 +363,8 @@ const Clients: React.FC = () => {
     const handleImportComplete = () => {
         setIsImportModalOpen(false);
         setImportData([]);
-        // Force refresh? Handled by snapshot listeners usually.
+        refreshClients();
+        refreshDueClients();
     };
 
     return (
@@ -726,6 +729,7 @@ const Clients: React.FC = () => {
                 fileData={importData}
                 existingClients={clients}
                 onImportComplete={handleImportComplete}
+                bulkAddClients={bulkAddClients}
             />
         </div>
     );

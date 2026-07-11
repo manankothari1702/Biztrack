@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { useAuth } from '../context/AuthContext';
+import React, { useState, useEffect } from 'react';
+import { useAuth, PENDING_DELETION_STORAGE_KEY } from '../context/AuthContext';
 import { useNavigate } from 'react-router-dom';
 import { confirmSignUp, resendSignUpCode } from 'aws-amplify/auth';
 import { logger } from '../../../shared/utils/logger';
@@ -22,6 +22,20 @@ const Login: React.FC = () => {
     const [info, setInfo]               = useState('');
     const [loading, setLoading]         = useState(false);
     const [resendCooldown, setResendCooldown]       = useState(0);
+
+    // Show the pending-deletion message when the user lands here after being
+    // signed out by the global ACCOUNT_PENDING_DELETION handler.
+    useEffect(() => {
+        try {
+            const msg = sessionStorage.getItem(PENDING_DELETION_STORAGE_KEY);
+            if (msg) {
+                setError(msg);
+                sessionStorage.removeItem(PENDING_DELETION_STORAGE_KEY);
+            }
+        } catch {
+            // sessionStorage unavailable — nothing to do.
+        }
+    }, []);
 
     // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -55,9 +69,15 @@ const Login: React.FC = () => {
         e.preventDefault();
         setError(''); setInfo('');
 
-        if (password.length < 8) { setError('Password must be at least 8 characters.'); return; }
+        // Mirror the Cognito password policy (audit C2) so users get clear inline errors
+        // instead of a Cognito rejection at submit.
+        if (password.length < 12) { setError('Password must be at least 12 characters.'); return; }
         if (!/[A-Z]/.test(password)) { setError('Password must contain at least one uppercase letter.'); return; }
+        if (!/[a-z]/.test(password)) { setError('Password must contain at least one lowercase letter.'); return; }
         if (!/[0-9]/.test(password)) { setError('Password must contain at least one number.'); return; }
+        // Symbol set = Cognito's EXACT requireSymbols special characters (not "any non-alnum",
+        // which would accept unicode/space that Cognito rejects → confusing server rejection).
+        if (!/[$*.^?!@#%&/,><':;|_~`+={}()"\[\]\\-]/.test(password)) { setError('Password must contain at least one symbol (e.g. ! @ # $ % & *).'); return; }
 
         setLoading(true);
         try {

@@ -10,7 +10,6 @@ import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
-import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
 import * as path from 'path';
 
@@ -28,20 +27,23 @@ export class BiztrackStack extends cdk.Stack {
             signInAliases: { email: true },
             autoVerify: { email: true },
             passwordPolicy: {
-                minLength: 8,
+                // Hardened (audit C2). Config-only — existing passwords keep working; the new
+                // rule applies to new sign-ups / password changes. Keep the frontend signup
+                // validation (Login.tsx) in sync so users get clear inline errors.
+                minLength: 12,
                 requireLowercase: true,
                 requireUppercase: true,
                 requireDigits: true,
-                requireSymbols: false,
+                requireSymbols: true,
             },
             accountRecovery: cognito.AccountRecovery.EMAIL_ONLY,
             standardAttributes: {
-                email:          { required: true,  mutable: true },
-                fullname:       { required: false, mutable: true },
-                // Required for Google IdP attribute mapping to flow through to Lambda
-                profilePicture: { required: false, mutable: true },
-                givenName:      { required: false, mutable: true },
-                familyName:     { required: false, mutable: true },
+                email:    { required: true,  mutable: true },
+                fullname: { required: false, mutable: true },
+                // NOTE: profilePicture / givenName / familyName cannot be added
+                // to an existing UserPool — Cognito rejects standard-attribute
+                // changes. If those are ever needed, do it via a new pool +
+                // user migration.
             },
             // Custom attributes stored per user
             customAttributes: {
@@ -50,26 +52,6 @@ export class BiztrackStack extends cdk.Stack {
             },
             email: cognito.UserPoolEmail.withCognito(),
             removalPolicy: cdk.RemovalPolicy.RETAIN, // never auto-delete user accounts
-        });
-
-        // Google OAuth identity provider
-        // Credentials added manually via console or via CfnUserPoolIdentityProvider
-        // after getting client ID/secret from Google Cloud Console
-        const googleProvider = new cognito.UserPoolIdentityProviderGoogle(this, 'GoogleProvider', {
-            userPool,
-            clientId: ssm.StringParameter.valueForStringParameter(this, '/biztrack/google/client-id'),
-            // SecureString not supported in CFN — read as plain String; rotate via SSM console
-            clientSecretValue: cdk.SecretValue.unsafePlainText(
-                ssm.StringParameter.valueForStringParameter(this, '/biztrack/google/client-secret')
-            ),
-            scopes: ['email', 'profile', 'openid'],
-            attributeMapping: {
-                email:          cognito.ProviderAttribute.GOOGLE_EMAIL,
-                fullname:       cognito.ProviderAttribute.GOOGLE_NAME,
-                profilePicture: cognito.ProviderAttribute.GOOGLE_PICTURE,
-                givenName:      cognito.ProviderAttribute.GOOGLE_GIVEN_NAME,
-                familyName:     cognito.ProviderAttribute.GOOGLE_FAMILY_NAME,
-            },
         });
 
         const userPoolClient = new cognito.UserPoolClient(this, 'BiztrackWebClient', {
@@ -89,14 +71,11 @@ export class BiztrackStack extends cdk.Stack {
             },
             supportedIdentityProviders: [
                 cognito.UserPoolClientIdentityProvider.COGNITO,
-                cognito.UserPoolClientIdentityProvider.GOOGLE,
             ],
             accessTokenValidity:  cdk.Duration.hours(1),
             idTokenValidity:      cdk.Duration.hours(1),
             refreshTokenValidity: cdk.Duration.days(30),
         });
-
-        userPoolClient.node.addDependency(googleProvider);
 
         const userPoolDomain = new cognito.UserPoolDomain(this, 'BiztrackDomain', {
             userPool,
@@ -115,6 +94,7 @@ export class BiztrackStack extends cdk.Stack {
             sortKey:      { name: 'SK', type: dynamodb.AttributeType.STRING },
             billingMode:  dynamodb.BillingMode.PAY_PER_REQUEST, // scales to zero
             pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+            timeToLiveAttribute: 'expiresAt', // auto-expire META rate-limit rows; only touches items that have expiresAt
             removalPolicy: cdk.RemovalPolicy.RETAIN,
         });
 
@@ -183,13 +163,70 @@ export class BiztrackStack extends cdk.Stack {
         }));
 
         // ─────────────────────────────────────────────────────────────────────
+        // S3 + CLOUDFRONT (frontend hosting). Created before the Lambdas/API so the
+        // CloudFront domain can be DERIVED (not hardcoded) into the CORS allowlist below.
+        // ─────────────────────────────────────────────────────────────────────
+
+        const siteBucket = new s3.Bucket(this, 'BiztrackSiteBucket', {
+            bucketName: `biztrack-frontend-${this.account}`,
+            blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+            autoDeleteObjects: true,
+        });
+
+        const distribution = new cloudfront.Distribution(this, 'BiztrackCDN', {
+            defaultBehavior: {
+                origin: origins.S3BucketOrigin.withOriginAccessControl(siteBucket),
+                viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+                cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
+                compress: true,
+            },
+            defaultRootObject: 'index.html',
+            // SPA: serve index.html for all 403/404 (client-side routing)
+            errorResponses: [
+                { httpStatus: 403, responseHttpStatus: 200, responsePagePath: '/index.html' },
+                { httpStatus: 404, responseHttpStatus: 200, responsePagePath: '/index.html' },
+            ],
+            priceClass: cloudfront.PriceClass.PRICE_CLASS_100, // US/EU/AP — cheapest
+        });
+
+        // CORS allowlist (audit C3). Derived from the CloudFront distribution — no hardcoded
+        // origin that breaks in another deploy. Environment-aware: localhost is trusted ONLY
+        // in dev (`cdk deploy -c env=dev`), NEVER in prod. Used by BOTH the API Gateway
+        // preflight and the Lambda response headers (lib/response.ts) so the two layers agree.
+        const isDev = this.node.tryGetContext('env') === 'dev';
+        const appOrigin = `https://${distribution.distributionDomainName}`;
+        const allowedOrigins = isDev ? [appOrigin, 'http://localhost:5173'] : [appOrigin];
+
+        // ─────────────────────────────────────────────────────────────────────
         // 4. LAMBDA FUNCTIONS — one per domain (thin handlers, shared layer later)
         // ─────────────────────────────────────────────────────────────────────
 
         const commonEnv = {
             TABLE_NAME:       table.tableName,
+            ALLOWED_ORIGINS:  allowedOrigins.join(','),
             AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1',
         };
+
+        // Dedicated role for lambdas that touch Cognito admin APIs (user, purge).
+        // Kept separate from the shared lambdaRole because the shared role is
+        // used by the Cognito post-confirmation trigger — referencing
+        // userPool.userPoolArn from that role would create a circular
+        // dependency (userPool ↔ trigger lambda ↔ role).
+        const adminLambdaRole = new iam.Role(this, 'BiztrackAdminLambdaRole', {
+            assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+            managedPolicies: [
+                iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
+            ],
+        });
+        table.grantReadWriteData(adminLambdaRole);
+        adminLambdaRole.addToPolicy(new iam.PolicyStatement({
+            actions: [
+                'cognito-idp:AdminUserGlobalSignOut',
+                'cognito-idp:AdminDeleteUser',
+            ],
+            resources: [userPool.userPoolArn],
+        }));
 
         // Lambda code — package the whole lambda/ directory (dist/ + node_modules/)
         // Handler paths use "dist/filename.handler" to match compiled output location.
@@ -208,9 +245,27 @@ export class BiztrackStack extends cdk.Stack {
             environment: commonEnv,
         } satisfies Partial<lambda.FunctionProps>;
 
+        // ── Reserved concurrency (Phase C, audit B4) ────────────────────────
+        // GATED OFF by default. Enable ONLY after the Lambda account concurrency
+        // quota is raised to >=300 (Phase A) via:  cdk deploy -c reserveConcurrency=true
+        // AWS requires >=100 unreserved concurrency to remain in the account, so at
+        // the current account limit of 10 ANY reserved value fails `cdk deploy`. With
+        // the flag OFF, rc() returns {} so no reservedConcurrentExecutions is set and
+        // every function stays unreserved (shared pool) -> deploy succeeds at limit 10.
+        // NOTE: the numbers at each call site assume the quota is raised to ~1000.
+        // Before enabling, recompute against the ACTUAL confirmed limit and re-verify
+        // sum(reserved) <= (limit - 100). Planned: user 60, clients 50, dashboard 30,
+        // tasks 30, whatsappTest 5, scheduler 2, purge 2, postConfirmation UNRESERVED
+        // (signup critical-path) = 179 total.
+        const reserveConcurrency =
+            this.node.tryGetContext('reserveConcurrency') === true ||
+            this.node.tryGetContext('reserveConcurrency') === 'true';
+        const rc = (n: number): { reservedConcurrentExecutions?: number } =>
+            reserveConcurrency ? { reservedConcurrentExecutions: n } : {};
+
         // ─────────────────────────────────────────────────────────────────────
         // 4a. POST-CONFIRMATION TRIGGER — creates DynamoDB profile for new users
-        //     (email sign-ups after verification AND first Google federated sign-in)
+        //     (email sign-ups after Cognito verification)
         // ─────────────────────────────────────────────────────────────────────
 
         const postConfirmationLambda = new lambda.Function(this, 'PostConfirmationHandler', {
@@ -219,6 +274,8 @@ export class BiztrackStack extends cdk.Stack {
             code: lambdaCode,
             handler: 'dist/cognitoPostConfirmation.handler',
             timeout: cdk.Duration.seconds(10),
+            // Intentionally UNRESERVED (Phase C): signup critical-path, rare — benefits
+            // from the shared pool (the heavy functions are capped so can't drain it).
         });
 
         userPool.addTrigger(cognito.UserPoolOperation.POST_CONFIRMATION, postConfirmationLambda);
@@ -229,6 +286,7 @@ export class BiztrackStack extends cdk.Stack {
             functionName: 'biztrack-clients',
             code: lambdaCode,
             handler: 'dist/clients.handler',
+            ...rc(50), // expensive (bulk/list) — caps B1/B2 concurrent blast radius
         });
 
         // Tasks CRUD
@@ -237,6 +295,7 @@ export class BiztrackStack extends cdk.Stack {
             functionName: 'biztrack-tasks',
             code: lambdaCode,
             handler: 'dist/tasks.handler',
+            ...rc(30), // cheap interactive CRUD — generous
         });
 
         // Dashboard (counts + lists)
@@ -245,14 +304,21 @@ export class BiztrackStack extends cdk.Stack {
             functionName: 'biztrack-dashboard',
             code: lambdaCode,
             handler: 'dist/dashboard.handler',
+            ...rc(30), // expensive 6-query aggregate; bounded (one per nav)
         });
 
-        // User profile + org nodes
+        // User profile + org nodes — uses adminLambdaRole because DELETE /user
+        // calls AdminUserGlobalSignOut. Env var and role both set per-lambda
+        // (not commonEnv / lambdaRole) to avoid a circular dep with the post-
+        // confirmation Cognito trigger.
         const userLambda = new lambda.Function(this, 'UserHandler', {
             ...lambdaDefaults,
             functionName: 'biztrack-user',
             code: lambdaCode,
             handler: 'dist/user.handler',
+            role: adminLambdaRole,
+            environment: { ...commonEnv, USER_POOL_ID: userPool.userPoolId },
+            ...rc(60), // highest frequency: 30s profile+org poll per active session
         });
 
         // WhatsApp daily report scheduler (triggered by EventBridge)
@@ -262,6 +328,7 @@ export class BiztrackStack extends cdk.Stack {
             code: lambdaCode,
             handler: 'dist/whatsappScheduler.handler',
             timeout: cdk.Duration.seconds(120),
+            ...rc(2), // one invocation/minute; 2 covers run-overlap
         });
 
         // WhatsApp test (called directly from frontend via API Gateway)
@@ -270,6 +337,22 @@ export class BiztrackStack extends cdk.Stack {
             functionName: 'biztrack-whatsapp-test',
             code: lambdaCode,
             handler: 'dist/whatsappTest.handler',
+            ...rc(5), // already per-user capped (item 1: 10/day, 1/hr); tiny volume
+        });
+
+        // Scheduled account purge — permanently deletes accounts whose 7-day
+        // recovery window has elapsed. Larger timeout/memory because it may
+        // batch-delete thousands of rows per account.
+        const purgeAccountsLambda = new lambda.Function(this, 'PurgeAccountsHandler', {
+            ...lambdaDefaults,
+            functionName: 'biztrack-purge-accounts',
+            code: lambdaCode,
+            handler: 'dist/purgeAccounts.handler',
+            timeout: cdk.Duration.minutes(5),
+            memorySize: 512,
+            role: adminLambdaRole,
+            environment: { ...commonEnv, USER_POOL_ID: userPool.userPoolId },
+            ...rc(2), // daily single 5-min run
         });
 
         // ─────────────────────────────────────────────────────────────────────
@@ -281,6 +364,14 @@ export class BiztrackStack extends cdk.Stack {
             schedule: events.Schedule.rate(cdk.Duration.minutes(1)),
         });
         schedulerRule.addTarget(new targets.LambdaFunction(whatsappSchedulerLambda));
+
+        // Daily account purge — runs at 03:00 UTC to permanently delete accounts
+        // whose 7-day recovery window has expired.
+        const purgeRule = new events.Rule(this, 'PurgeAccountsRule', {
+            ruleName: 'biztrack-purge-accounts-daily',
+            schedule: events.Schedule.cron({ minute: '0', hour: '3' }),
+        });
+        purgeRule.addTarget(new targets.LambdaFunction(purgeAccountsLambda));
 
         // ─────────────────────────────────────────────────────────────────────
         // 6. API GATEWAY — replaces Firebase callable functions
@@ -297,14 +388,27 @@ export class BiztrackStack extends cdk.Stack {
             restApiName: 'biztrack-api',
             description: 'Biztrack CRM REST API',
             defaultCorsPreflightOptions: {
-                allowOrigins: apigateway.Cors.ALL_ORIGINS,
+                allowOrigins: allowedOrigins, // audit C3 — allowlist, not '*' (env-aware; see above)
                 allowMethods: apigateway.Cors.ALL_METHODS,
                 allowHeaders: ['Content-Type', 'Authorization'],
             },
             deployOptions: {
                 stageName: 'prod',
-                throttlingRateLimit: 100,
-                throttlingBurstLimit: 200,
+                // Phase B (audit B4) — PALLIATIVE, NOT THE CURE. Aligns the front door to
+                // the ~10-concurrency backend so overflow returns clean edge 429s instead
+                // of ugly Lambda-level throttle 500s. It does NOT fix "10 slots is too few
+                // for normal operation" — only raising the account concurrency quota
+                // (Phase A) does. POST-PHASE-A TARGET: raise stage back toward ~100/200 and
+                // the per-method caps below proportionally.
+                throttlingRateLimit: 25,
+                throttlingBurstLimit: 50,
+                methodOptions: {
+                    // Most expensive read (6-query aggregate). Post-Phase-A target ~20/40.
+                    '/dashboard/GET':       { throttlingRateLimit: 5, throttlingBurstLimit: 10 },
+                    // Heaviest writes (bulk import/delete). Post-Phase-A target ~10/20.
+                    '/clients/bulk/POST':   { throttlingRateLimit: 2, throttlingBurstLimit: 5 },
+                    '/clients/bulk/DELETE': { throttlingRateLimit: 2, throttlingBurstLimit: 5 },
+                },
             },
         });
 
@@ -345,8 +449,9 @@ export class BiztrackStack extends cdk.Stack {
 
         // /user  (profile + org nodes)
         const userResource = api.root.addResource('user');
-        userResource.addMethod('GET', new apigateway.LambdaIntegration(userLambda), authOptions);
-        userResource.addMethod('PUT', new apigateway.LambdaIntegration(userLambda), authOptions);
+        userResource.addMethod('GET',    new apigateway.LambdaIntegration(userLambda), authOptions);
+        userResource.addMethod('PUT',    new apigateway.LambdaIntegration(userLambda), authOptions);
+        userResource.addMethod('DELETE', new apigateway.LambdaIntegration(userLambda), authOptions);
 
         const orgResource = userResource.addResource('org');
         orgResource.addMethod('GET',  new apigateway.LambdaIntegration(userLambda), authOptions);
@@ -361,32 +466,8 @@ export class BiztrackStack extends cdk.Stack {
         const whatsappTest = whatsappResource.addResource('test');
         whatsappTest.addMethod('POST', new apigateway.LambdaIntegration(whatsappTestLambda), authOptions);
 
-        // ─────────────────────────────────────────────────────────────────────
-        // 7. S3 + CLOUDFRONT — replaces Firebase Hosting
-        // ─────────────────────────────────────────────────────────────────────
-
-        const siteBucket = new s3.Bucket(this, 'BiztrackSiteBucket', {
-            bucketName: `biztrack-frontend-${this.account}`,
-            blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
-            removalPolicy: cdk.RemovalPolicy.DESTROY,
-            autoDeleteObjects: true,
-        });
-
-        const distribution = new cloudfront.Distribution(this, 'BiztrackCDN', {
-            defaultBehavior: {
-                origin: origins.S3BucketOrigin.withOriginAccessControl(siteBucket),
-                viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-                cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
-                compress: true,
-            },
-            defaultRootObject: 'index.html',
-            // SPA: serve index.html for all 403/404 (client-side routing)
-            errorResponses: [
-                { httpStatus: 403, responseHttpStatus: 200, responsePagePath: '/index.html' },
-                { httpStatus: 404, responseHttpStatus: 200, responsePagePath: '/index.html' },
-            ],
-            priceClass: cloudfront.PriceClass.PRICE_CLASS_100, // US/EU/AP — cheapest
-        });
+        // (S3 + CloudFront moved above the Lambda/API section so the CORS allowlist can
+        //  derive the CloudFront domain — see the "S3 + CLOUDFRONT" block earlier.)
 
         // ─────────────────────────────────────────────────────────────────────
         // 8. STACK OUTPUTS — values the frontend .env needs

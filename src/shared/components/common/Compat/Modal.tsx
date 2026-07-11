@@ -1,4 +1,5 @@
 import React, { useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { Button } from './Button';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { faTimes } from '@fortawesome/free-solid-svg-icons';
@@ -23,7 +24,9 @@ export const Modal: React.FC<ModalProps> = ({ isOpen, onClose, title, children, 
 
     if (!isOpen) return null;
 
-    return (
+    // Render into document.body so ancestor transforms (e.g. animate-fade-in-up)
+    // can't trap `position: fixed` inside a smaller containing block.
+    return createPortal(
         <div className="fixed inset-0 z-[100] overflow-y-auto">
             <div className="flex min-h-screen items-center justify-center p-4 text-center sm:p-0">
                 <div className="fixed inset-0 bg-slate-900 bg-opacity-75 transition-opacity backdrop-blur-sm" onClick={onClose} aria-hidden="true" />
@@ -59,6 +62,7 @@ export const Modal: React.FC<ModalProps> = ({ isOpen, onClose, title, children, 
                     )}
                 </div>
             </div>
-        </div>
+        </div>,
+        document.body
     );
 };
