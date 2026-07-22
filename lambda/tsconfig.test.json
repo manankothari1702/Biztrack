@@ -1,0 +1,12 @@
+{
+    // Typechecks the test files, which the build config deliberately excludes
+    // so they never reach dist/ (and therefore never reach the Lambda asset).
+    // Run: npm run typecheck:test
+    "extends": "./tsconfig.json",
+    "compilerOptions": {
+        "noEmit": true,
+        "types": ["node", "vitest/globals"]
+    },
+    "include": ["src/**/*"],
+    "exclude": ["node_modules", "dist"]
+}
