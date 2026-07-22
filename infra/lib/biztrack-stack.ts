@@ -140,6 +140,33 @@ export class BiztrackStack extends cdk.Stack {
             nonKeyAttributes: ['uid', 'phoneNumber', 'countryCode', 'name', 'timezone'],
         });
 
+        // GSI 6: inventory dates — ONE index serving two entities, both keyed on
+        //        the user partition with a date sort key called `invDate`:
+        //
+        //          Batch    invDate = expiryDate  -> "expiring between today and
+        //                                            today+N", and "expired"
+        //          Invoice  invDate = createdAt   -> chronological, newest-first
+        //
+        //        They can share because the index is sparse (only these two write
+        //        `invDate`) and every query filters by SK prefix anyway —
+        //        begins_with(SK,'BATCH#') or begins_with(SK,'INVOICE#') — exactly
+        //        as GSI1/GSI2 already do for clients and tasks.
+        //
+        //        Sharing is what lets the invoice sort key stay INVOICE#<id>:
+        //        point reads by id and the attribute_not_exists(PK) idempotency
+        //        guard both need the id alone to be the whole key, so ordering
+        //        cannot live in the sort key. See 07_BUILD_PLAN.md C7.
+        //
+        //        NOTE: CloudFormation permits only ONE GSI addition per stack
+        //        update. That is the sole reason this index ships in a deploy of
+        //        its own, ahead of the handlers that query it.
+        table.addGlobalSecondaryIndex({
+            indexName: 'GSI6-InventoryDate',
+            partitionKey: { name: 'PK',      type: dynamodb.AttributeType.STRING },
+            sortKey:      { name: 'invDate', type: dynamodb.AttributeType.STRING },
+            projectionType: dynamodb.ProjectionType.ALL,
+        });
+
         // ─────────────────────────────────────────────────────────────────────
         // 3. LAMBDA EXECUTION ROLE
         // ─────────────────────────────────────────────────────────────────────
