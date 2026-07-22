@@ -37,8 +37,10 @@ Kick off early — AWS review can take a day or two. Confirm with
    simulation / read-only checks only; the deploy-gated curl checks (provided per item during
    remediation) are what turn "logic proven" into "works in production." That is the real
    sign-off.
-   - Deploy: `cd lambda && npm run build` → `cd infra && npx cdk deploy` (add `-c env=dev` for a
-     dev CORS deploy that also trusts `http://localhost:5173`).
+   - Deploy: `cd lambda && npm run build` → `cd infra && npx cdk deploy`.
+   - **Do not reach for `-c env=dev` to develop locally.** It mutates this same prod stack and
+     widens the live CORS allowlist for as long as it stays deployed. Use the Vite dev proxy
+     instead — see FU-B6 and the root `README.md`.
 
 ---
 
@@ -91,7 +93,8 @@ so toggling reports on from a fresh profile 400s with a generic toast.
 ### FU-B1 · Enable Phase C reserved concurrency  → item 3 (B4)
 Written and flag-gated OFF (`cdk deploy -c reserveConcurrency=true`). Enable **only after FU-0**
 raises the quota (≥300). Before enabling, recompute the per-function numbers against the ACTUAL
-confirmed limit and re-verify `sum(reserved) ≤ limit − 100` (current plan sums to 179).
+confirmed limit and re-verify `sum(reserved) ≤ limit − 100`. The plan now sums to **239** — it
+was 179 before the inventory handlers added products 30, batches 20, stockMovements 10.
 Optionally then loosen the Phase B throttles toward the in-code targets.
 
 ### FU-B2 · Cognito MFA rollout  → item 7 (C2)
@@ -115,6 +118,74 @@ arbitrary number" path (today mitigated by format-validation + the 10/day, 1/hr 
 Item 2 caps photos at 200KB server-side, but they still ride inside every `GET /user` (incl. the
 30s poll). S3 + presigned URLs removes the base64-in-DynamoDB class entirely (infra + client
 upload rewrite + migration of existing base64/Google-URL photos).
+
+### FU-B6 · Separate dev stack  → from the C3 CORS lockdown
+
+**Status: deferred, will be implemented.** Not a "maybe" — the current setup has no dev
+environment at all. One CloudFormation stack (`BiztrackStack`), one API Gateway stage (`prod`),
+one DynamoDB table (`biztrack`), one Cognito pool (`biztrack-users`). Local development runs
+against production.
+
+**Trigger — implement when any of these becomes true:**
+- a second developer joins (a shared prod table stops being merely untidy);
+- local testing needs to write freely without touching prod data (destructive tests, seeding,
+  migration rehearsals);
+- prod uptime starts mattering enough that iterating against it is unacceptable.
+
+**Blocked on:** parameterizing the hardcoded physical names in `infra/lib/biztrack-stack.ts`.
+Two stacks cannot coexist in one account/region while these are fixed strings:
+
+| What | Current value |
+|------|---------------|
+| `tableName` | `biztrack` |
+| `userPoolName` | `biztrack-users` |
+| `domainPrefix` | `biztrack-auth` |
+| `restApiName` | `biztrack-api` |
+| `functionName` ×11 | `biztrack-post-confirmation`, `-clients`, `-tasks`, `-products`, `-batches`, `-stock-movements`, `-dashboard`, `-user`, `-whatsapp-scheduler`, `-whatsapp-test`, `-purge-accounts` |
+| `ruleName` ×2 | `biztrack-whatsapp-every-minute`, `biztrack-purge-accounts-daily` |
+| `bucketName` | `biztrack-frontend-${account}` (account-scoped, so identical across stacks) |
+
+Also needed: an env-suffixed stack id in `infra/bin/infra.ts` (currently the literal
+`'BiztrackStack'`).
+
+**⚠️ Hazard — the reason this needs care, not just effort.** `env=prod` must resolve to the
+**exact** current strings. Any drift — a suffix, a case change, a stray hyphen — is a physical
+name change, and CloudFormation implements that as **replace**, not rename. For the table that
+means a new empty `biztrack-prod` alongside the old one; `RemovalPolicy.RETAIN` would orphan the
+real data rather than delete it, but the app comes up empty and the rollback is manual. Same
+class of risk for the Cognito pool (`RETAIN`, and users are not portable between pools).
+Verify with `cdk diff` that the prod path shows **no** change to any physical name before
+deploying the parameterization.
+
+**Interim (in place today):** Vite dev proxy + a dedicated Cognito dev user. The proxy
+(`server.proxy` in `vite.config.ts`, enabled by `VITE_API_URL=/api` in a gitignored
+`.env.local`) keeps the browser same-origin so the C3 allowlist is never involved. The dev user
+gives real data isolation without a second table, because every row is keyed `PK = USER#<uid>`
+from the verified token. See the **Local development** section of the root `README.md`.
+
+> Note: `-c env=dev` exists on the stack but is **not** the interim answer. It mutates the same
+> prod stack and would widen the live allowlist for the duration — see the deploy note in
+> "Owner gates" above.
+
+### FU-B7 · `axios` / `form-data` advisories in `lambda/`  → pre-existing, surfaced 2026-07-22
+
+`npm audit --omit=dev` in `lambda/` reports **2 high** advisories in **production** dependencies:
+
+- **`axios` 1.0.0–1.17.0** — ten advisories: DoS via recursion in `formDataToJSON`, prototype
+  pollution (auth subfields / request construction / nested options), `maxBodyLength` bypasses
+  (fetch `ReadableStream`, HTTP/2 streamed uploads), `NO_PROXY` bypass for `0.0.0.0`, proxy
+  inherited after interceptor config cloning, form serializer `maxDepth` bypass.
+- **`form-data` 4.0.0–4.0.5** — CRLF injection via unescaped multipart field names/filenames
+  (transitive, via axios).
+
+Used only by `whatsappScheduler.ts` and `whatsappTest.ts`, which POST a fixed JSON body to the
+Meta Graph API — no multipart, no user-controlled proxy config, no form serialization. So
+exposure is low, but these are shipped production deps, not dev tooling.
+
+`npm audit fix` claims a fix is available. **Not applied**: bumping a dependency that eight live
+Lambdas load is its own change with its own deploy and verification, and it was out of scope of
+the work that surfaced it. Do it as a standalone commit: bump, `npm run build`, `npm test`,
+deploy, then invoke `biztrack-whatsapp-test` to confirm the Graph API call still works.
 
 ---
 

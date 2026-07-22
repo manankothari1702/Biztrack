@@ -24,8 +24,9 @@ Biztrack is a comprehensive business management dashboard designed for independe
 ### Prerequisites
 
 - Node.js (v18 or higher recommended)
-- npm or yarn
-- Firebase Project setup
+- npm
+- Access to the deployed AWS stack (Cognito user pool + API Gateway), or your own
+  `cd infra && npx cdk deploy`
 
 ### Installation
 
@@ -41,14 +42,14 @@ Biztrack is a comprehensive business management dashboard designed for independe
    ```
 
 3. **Environment Setup:**
-   Create a `.env` file in the root directory based on `.env.example` and add your Firebase configuration details:
+   Copy `.env.example` to `.env` and fill in the values from the CDK stack outputs
+   (`cd infra && npx cdk deploy` prints them):
    ```env
-   VITE_FIREBASE_API_KEY=your_api_key
-   VITE_FIREBASE_AUTH_DOMAIN=your_auth_domain
-   VITE_FIREBASE_PROJECT_ID=your_project_id
-   VITE_FIREBASE_STORAGE_BUCKET=your_storage_bucket
-   VITE_FIREBASE_MESSAGING_SENDER_ID=your_messaging_sender_id
-   VITE_FIREBASE_APP_ID=your_app_id
+   VITE_COGNITO_USER_POOL_ID=   # CDK output: UserPoolId
+   VITE_COGNITO_CLIENT_ID=      # CDK output: UserPoolClientId
+   VITE_COGNITO_DOMAIN=         # CDK output: CognitoDomain
+   VITE_API_URL=                # CDK output: ApiUrl  (absolute — used by builds)
+   VITE_APP_URL=                # CDK output: CloudFrontUrl
    ```
 
 4. **Run the development server:**
@@ -56,6 +57,61 @@ Biztrack is a comprehensive business management dashboard designed for independe
    npm run dev
    ```
    The application will be available at `http://localhost:5173`.
+
+## 🧑‍💻 Local development
+
+### The API proxy — why `npm run dev` needs `.env.local`
+
+The deployed API's CORS allowlist trusts **only** the CloudFront origin. That is
+deliberate: security audit **C3** replaced a wildcard `*` with an explicit allowlist.
+
+The consequence is that a browser at `http://localhost:5173` cannot call the API
+directly. The preflight still returns `204`, but its
+`Access-Control-Allow-Origin` names CloudFront, so the browser discards the
+response. It surfaces as an opaque *"CORS error"* rather than a clear 4xx:
+
+```
+OPTIONS /products   Origin: http://localhost:5173
+→ 204,  Access-Control-Allow-Origin: https://d3o7zfo5sdvcnd.cloudfront.net   ✗ mismatch
+```
+
+**We do not fix this by adding localhost to the production allowlist.** Instead
+the Vite dev server proxies API calls (see `server.proxy` in `vite.config.ts`):
+the browser calls same-origin `/api/*`, Vite forwards it to API Gateway
+server-side, and CORS never applies — no preflight is even sent.
+
+To enable it, create a **`.env.development.local`** in the repo root:
+
+```env
+VITE_API_URL=/api
+```
+
+> ⚠️ **Use `.env.development.local`, not `.env.local`.** Vite loads `.env.local`
+> in *every* mode, including `vite build` — so `VITE_API_URL=/api` there gets
+> baked into the production bundle, and the deployed app calls `/api/*` on the
+> CloudFront origin where nothing is listening. `.env.development.local` loads
+> only in development mode, so `npm run build` still reads the absolute URL from
+> `.env`. Both are gitignored.
+
+Vite layers `.env` → `.env.development` → `.env.development.local` **per key**,
+so Cognito settings still come from `.env`; only the API URL changes locally.
+
+To proxy somewhere other than the default prod API, export
+`VITE_API_PROXY_TARGET` before `npm run dev`.
+
+Sign-in needs no special setup: the Cognito app client already registers
+`http://localhost:5173` as a callback/logout URL, so only the API was ever blocked.
+
+### Use a dedicated Cognito dev user
+
+Local development runs against the **production** table. Data is partitioned per
+user (`PK = USER#<uid>`, with `uid` taken from the verified token), so signing in
+as a dedicated dev account gives you complete isolation from real data without a
+second table or stack — you cannot read or write another user's rows.
+
+**Create one, then use it for all local work.** See
+`docs/followups/README.md` → *FU-B6* for why a fully separate dev stack is
+deferred rather than done.
 
 ### Building for Production
 
