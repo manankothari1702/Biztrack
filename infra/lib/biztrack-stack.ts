@@ -12,6 +12,8 @@ import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
 import { Construct } from 'constructs';
 import * as path from 'path';
+import * as fs from 'fs';
+import { execSync } from 'child_process';
 
 export class BiztrackStack extends cdk.Stack {
     constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -255,12 +257,62 @@ export class BiztrackStack extends cdk.Stack {
             resources: [userPool.userPoolArn],
         }));
 
-        // Lambda code — package the whole lambda/ directory (dist/ + node_modules/)
-        // Handler paths use "dist/filename.handler" to match compiled output location.
-        const lambdaDistPath = path.join(__dirname, '../../lambda/dist');
-        const lambdaCode = require('fs').existsSync(lambdaDistPath)
-            ? lambda.Code.fromAsset(path.join(__dirname, '../../lambda'), {
-                exclude: ['src/**', 'tsconfig.json'],
+        // ── Lambda code asset ────────────────────────────────────────────────
+        //
+        // Handler paths are "dist/<file>.handler", matching the tsc output layout.
+        //
+        // The asset is BUNDLED rather than copied. Previously it packaged the whole
+        // lambda/ directory, which meant every function shipped the full dev
+        // toolchain — typescript alone is 24 MB, plus vitest/vite/@vitest — for a
+        // 36 MB zip that never runs any of it. Bundling replaces the asset contents
+        // with exactly what tryBundle writes to `outputDir`, so nothing ships unless
+        // it is copied there deliberately: compiled output, the manifests, and a
+        // production-only dependency tree from `npm ci --omit=dev`.
+        //
+        // `npm ci` (not `install`) so the tree is reproduced from the lockfile, and
+        // `--ignore-scripts` so a synth never executes package lifecycle hooks.
+        //
+        // AssetHashType.OUTPUT makes the asset's identity the bundled result. That
+        // is both correct (identity = what ships) and much cheaper than the default,
+        // which would hash-walk all 96 MB of the source node_modules.
+        //
+        // Local bundling runs npm directly; the Docker image is only a fallback for
+        // machines without a usable node/npm on PATH.
+        const lambdaRoot     = path.join(__dirname, '../../lambda');
+        const lambdaDistPath = path.join(lambdaRoot, 'dist');
+
+        const lambdaCode = fs.existsSync(lambdaDistPath)
+            ? lambda.Code.fromAsset(lambdaRoot, {
+                assetHashType: cdk.AssetHashType.OUTPUT,
+                bundling: {
+                    image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+                    command: [
+                        'bash', '-c',
+                        'cp -r dist package.json package-lock.json /asset-output/ '
+                        + '&& cd /asset-output '
+                        + '&& npm ci --omit=dev --ignore-scripts',
+                    ],
+                    local: {
+                        tryBundle(outputDir: string): boolean {
+                            try {
+                                fs.cpSync(lambdaDistPath, path.join(outputDir, 'dist'), { recursive: true });
+                                for (const manifest of ['package.json', 'package-lock.json']) {
+                                    fs.copyFileSync(
+                                        path.join(lambdaRoot, manifest),
+                                        path.join(outputDir, manifest),
+                                    );
+                                }
+                                execSync('npm ci --omit=dev --ignore-scripts', {
+                                    cwd:   outputDir,
+                                    stdio: 'inherit',
+                                });
+                                return true;
+                            } catch {
+                                return false;   // hand off to the Docker image above
+                            }
+                        },
+                    },
+                },
               })
             : lambda.Code.fromInline('exports.handler = async () => ({ statusCode: 200 })');
 

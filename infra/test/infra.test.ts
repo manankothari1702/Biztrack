@@ -1,15 +1,20 @@
 import * as cdk from 'aws-cdk-lib/core';
+import * as cxapi from 'aws-cdk-lib/cx-api';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import { BiztrackStack } from '../lib/biztrack-stack';
 
-// Synthesising the stack walks the lambda/ asset directory to hash it, which is
-// slow enough to blow the default 5s timeout. Do it once for the whole file.
+// Synthesising the stack stages the lambda/ asset, which is slow enough to blow
+// the default 5s timeout. Do it once for the whole file.
 jest.setTimeout(120_000);
 
 let template: Template;
 
 beforeAll(() => {
-    const app = new cdk.App();
+    // BUNDLING_STACKS = [] disables asset bundling for every stack. Without it
+    // each run would shell out to `npm ci --omit=dev`, making the suite slow and
+    // dependent on registry access. These tests assert the CloudFormation
+    // template, which the asset's contents do not affect.
+    const app = new cdk.App({ context: { [cxapi.BUNDLING_STACKS]: [] } });
     const stack = new BiztrackStack(app, 'TestStack', {
         env: { account: '123456789012', region: 'ap-south-1' },
     });
