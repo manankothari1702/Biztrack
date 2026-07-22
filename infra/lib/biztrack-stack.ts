@@ -334,8 +334,9 @@ export class BiztrackStack extends cdk.Stack {
         // NOTE: the numbers at each call site assume the quota is raised to ~1000.
         // Before enabling, recompute against the ACTUAL confirmed limit and re-verify
         // sum(reserved) <= (limit - 100). Planned: user 60, clients 50, dashboard 30,
-        // tasks 30, whatsappTest 5, scheduler 2, purge 2, postConfirmation UNRESERVED
-        // (signup critical-path) = 179 total.
+        // tasks 30, products 30, batches 20, stockMovements 10, whatsappTest 5,
+        // scheduler 2, purge 2, postConfirmation UNRESERVED (signup critical-path)
+        // = 239 total (was 179 before the inventory handlers).
         const reserveConcurrency =
             this.node.tryGetContext('reserveConcurrency') === true ||
             this.node.tryGetContext('reserveConcurrency') === 'true';
@@ -375,6 +376,36 @@ export class BiztrackStack extends cdk.Stack {
             code: lambdaCode,
             handler: 'dist/tasks.handler',
             ...rc(30), // cheap interactive CRUD — generous
+        });
+
+        // ── Inventory & invoicing ───────────────────────────────────────────
+
+        // Product catalogue CRUD + Excel bulk upsert + a product's batches
+        const productsLambda = new lambda.Function(this, 'ProductsHandler', {
+            ...lambdaDefaults,
+            functionName: 'biztrack-products',
+            code: lambdaCode,
+            handler: 'dist/products.handler',
+            ...rc(30), // bulk import is the heavy path — mirrors clients
+        });
+
+        // Expiry range queries (GSI6), manual batch corrections, write-offs.
+        // Every mutation here runs a DynamoDB transaction via lib/stock.ts.
+        const batchesLambda = new lambda.Function(this, 'BatchesHandler', {
+            ...lambdaDefaults,
+            functionName: 'biztrack-batches',
+            code: lambdaCode,
+            handler: 'dist/batches.handler',
+            ...rc(20), // interactive, low volume
+        });
+
+        // Read-only audit log. No write path exists at all.
+        const stockMovementsLambda = new lambda.Function(this, 'StockMovementsHandler', {
+            ...lambdaDefaults,
+            functionName: 'biztrack-stock-movements',
+            code: lambdaCode,
+            handler: 'dist/stockMovements.handler',
+            ...rc(10), // cheapest of the three; one list query
         });
 
         // Dashboard (counts + lists)
@@ -487,6 +518,9 @@ export class BiztrackStack extends cdk.Stack {
                     // Heaviest writes (bulk import/delete). Post-Phase-A target ~10/20.
                     '/clients/bulk/POST':   { throttlingRateLimit: 2, throttlingBurstLimit: 5 },
                     '/clients/bulk/DELETE': { throttlingRateLimit: 2, throttlingBurstLimit: 5 },
+                    // Excel catalogue import: reads every existing product, then
+                    // writes in batches. Same cost profile as /clients/bulk.
+                    '/products/bulk/POST':  { throttlingRateLimit: 2, throttlingBurstLimit: 5 },
                 },
             },
         });
@@ -521,6 +555,49 @@ export class BiztrackStack extends cdk.Stack {
         taskResource.addMethod('GET',    new apigateway.LambdaIntegration(tasksLambda), authOptions);
         taskResource.addMethod('PUT',    new apigateway.LambdaIntegration(tasksLambda), authOptions);
         taskResource.addMethod('DELETE', new apigateway.LambdaIntegration(tasksLambda), authOptions);
+
+        // ── Inventory & invoicing routes ────────────────────────────────────
+
+        // /products  GET + POST
+        const productsResource = api.root.addResource('products');
+        productsResource.addMethod('GET',  new apigateway.LambdaIntegration(productsLambda), authOptions);
+        productsResource.addMethod('POST', new apigateway.LambdaIntegration(productsLambda), authOptions);
+
+        // /products/bulk  POST + DELETE (Excel import / bulk delete).
+        // Declared BEFORE /products/{id} for readability only — API Gateway always
+        // prefers a literal segment over a path parameter, so 'bulk' can never be
+        // captured as an {id}. Same arrangement as /clients/bulk.
+        const productsBulk = productsResource.addResource('bulk');
+        productsBulk.addMethod('POST',   new apigateway.LambdaIntegration(productsLambda), authOptions);
+        productsBulk.addMethod('DELETE', new apigateway.LambdaIntegration(productsLambda), authOptions);
+
+        // /products/{id}  GET + PUT + DELETE
+        const productResource = productsResource.addResource('{id}');
+        productResource.addMethod('GET',    new apigateway.LambdaIntegration(productsLambda), authOptions);
+        productResource.addMethod('PUT',    new apigateway.LambdaIntegration(productsLambda), authOptions);
+        productResource.addMethod('DELETE', new apigateway.LambdaIntegration(productsLambda), authOptions);
+
+        // /products/{id}/batches  GET — the batch picker's source
+        const productBatches = productResource.addResource('batches');
+        productBatches.addMethod('GET', new apigateway.LambdaIntegration(productsLambda), authOptions);
+
+        // /batches  GET — expiry range queries over GSI6-InventoryDate
+        const batchesResource = api.root.addResource('batches');
+        batchesResource.addMethod('GET', new apigateway.LambdaIntegration(batchesLambda), authOptions);
+
+        // /batches/{productId}/{expiry}  PUT — manual correction (ADJUST, may re-key)
+        const batchProduct  = batchesResource.addResource('{productId}');
+        const batchResource = batchProduct.addResource('{expiry}');
+        batchResource.addMethod('PUT', new apigateway.LambdaIntegration(batchesLambda), authOptions);
+
+        // /batches/{productId}/{expiry}/write-off  POST — zero a batch, log WRITE_OFF
+        const batchWriteOff = batchResource.addResource('write-off');
+        batchWriteOff.addMethod('POST', new apigateway.LambdaIntegration(batchesLambda), authOptions);
+
+        // /stock-movements  GET only. The handler answers every other verb with
+        // 405; movements are written solely by lib/stock.ts inside transactions.
+        const stockMovementsResource = api.root.addResource('stock-movements');
+        stockMovementsResource.addMethod('GET', new apigateway.LambdaIntegration(stockMovementsLambda), authOptions);
 
         // /dashboard
         const dashboardResource = api.root.addResource('dashboard');

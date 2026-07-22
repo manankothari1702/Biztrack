@@ -91,3 +91,117 @@ describe('DynamoDB table', () => {
         expect((table.Properties.GlobalSecondaryIndexes as unknown[]).length).toBe(6);
     });
 });
+
+describe('inventory Lambda functions', () => {
+    test.each([
+        ['biztrack-products',        'dist/products.handler'],
+        ['biztrack-batches',         'dist/batches.handler'],
+        ['biztrack-stock-movements', 'dist/stockMovements.handler'],
+    ])('%s is wired to %s', (functionName, handler) => {
+        template.hasResourceProperties('AWS::Lambda::Function', {
+            FunctionName: functionName,
+            Handler:      handler,
+            Runtime:      'nodejs20.x',
+        });
+    });
+
+    test('they get the shared table + CORS environment', () => {
+        for (const functionName of ['biztrack-products', 'biztrack-batches', 'biztrack-stock-movements']) {
+            template.hasResourceProperties('AWS::Lambda::Function', {
+                FunctionName: functionName,
+                Environment: { Variables: Match.objectLike({ TABLE_NAME: Match.anyValue() }) },
+            });
+        }
+    });
+
+    test('the stack now declares 11 biztrack functions', () => {
+        // 8 pre-existing + products + batches + stockMovements. Counted by name
+        // rather than resource type: CDK also synthesises its own unnamed helper
+        // (S3AutoDeleteObjects, from autoDeleteObjects on the site bucket), and a
+        // raw resourceCountIs would break whenever CDK adds another internal one.
+        const named = Object.values(template.findResources('AWS::Lambda::Function'))
+            .map(fn => fn.Properties?.FunctionName)
+            .filter((n): n is string => typeof n === 'string' && n.startsWith('biztrack-'));
+
+        expect(named.sort()).toEqual([
+            'biztrack-batches',
+            'biztrack-clients',
+            'biztrack-dashboard',
+            'biztrack-post-confirmation',
+            'biztrack-products',
+            'biztrack-purge-accounts',
+            'biztrack-stock-movements',
+            'biztrack-tasks',
+            'biztrack-user',
+            'biztrack-whatsapp-scheduler',
+            'biztrack-whatsapp-test',
+        ]);
+    });
+});
+
+describe('inventory API routes', () => {
+    // Resource path -> the methods that must exist on it.
+    const expected: [string, string[]][] = [
+        ['products',      ['GET', 'POST']],
+        ['bulk',          ['POST', 'DELETE']],
+        ['{id}',          ['GET', 'PUT', 'DELETE']],
+        ['batches',       ['GET']],
+        ['{productId}',   []],
+        ['{expiry}',      ['PUT']],
+        ['write-off',     ['POST']],
+        ['stock-movements', ['GET']],
+    ];
+
+    test.each(expected.filter(([, methods]) => methods.length > 0))(
+        '/%s exposes %s', (pathPart, methods) => {
+            const resources = template.findResources('AWS::ApiGateway::Resource', {
+                Properties: { PathPart: pathPart },
+            });
+            expect(Object.keys(resources).length).toBeGreaterThan(0);
+
+            for (const method of methods) {
+                // Every inventory method is Cognito-authorized, like the rest.
+                template.hasResourceProperties('AWS::ApiGateway::Method', {
+                    HttpMethod:        method,
+                    AuthorizationType: 'COGNITO_USER_POOLS',
+                });
+            }
+        },
+    );
+
+    test('write-off hangs off /batches/{productId}/{expiry}', () => {
+        const writeOff = Object.values(template.findResources('AWS::ApiGateway::Resource', {
+            Properties: { PathPart: 'write-off' },
+        }))[0];
+        const expiry = Object.entries(template.findResources('AWS::ApiGateway::Resource', {
+            Properties: { PathPart: '{expiry}' },
+        }))[0];
+        expect(writeOff.Properties.ParentId.Ref).toBe(expiry[0]);
+    });
+
+    test('/stock-movements is GET-only — no write verb is routed', () => {
+        const resource = Object.entries(template.findResources('AWS::ApiGateway::Resource', {
+            Properties: { PathPart: 'stock-movements' },
+        }))[0];
+        const methods = Object.values(template.findResources('AWS::ApiGateway::Method'))
+            .filter(m => m.Properties.ResourceId?.Ref === resource[0])
+            .map(m => m.Properties.HttpMethod);
+
+        expect(methods.sort()).toEqual(['GET', 'OPTIONS']);   // OPTIONS is CORS preflight
+    });
+});
+
+describe('throttling', () => {
+    test('POST /products/bulk is capped like /clients/bulk', () => {
+        const stage = Object.values(template.findResources('AWS::ApiGateway::Stage'))[0];
+        const settings = stage.Properties.MethodSettings as {
+            HttpMethod: string; ResourcePath: string;
+            ThrottlingRateLimit: number; ThrottlingBurstLimit: number;
+        }[];
+
+        const bulk = settings.find(s => s.ResourcePath === '/~1products~1bulk' && s.HttpMethod === 'POST');
+        expect(bulk).toBeDefined();
+        expect(bulk!.ThrottlingRateLimit).toBe(2);
+        expect(bulk!.ThrottlingBurstLimit).toBe(5);
+    });
+});
