@@ -38,6 +38,24 @@ export const addDaysIso = (date: IsoDate, days: number): IsoDate =>
 export const daysUntil = (date: IsoDate, today: IsoDate = todayIso()): number =>
     differenceInCalendarDays(parseISO(date), parseISO(today));
 
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'] as const;
+
+/**
+ * `2026-11-15` → `15 Nov 2026`, for display.
+ *
+ * Formats from the string's own components rather than via `new Date(...)`,
+ * which would parse a date-only value as UTC midnight and render the previous
+ * day for any viewer west of UTC.
+ */
+export const formatIsoDate = (date?: IsoDate): string => {
+    if (!date) return '—';
+    const [y, m, d] = date.split('-');
+    const month = MONTHS[Number(m) - 1];
+    if (!month || !y || !d) return date;
+    return `${Number(d)} ${month} ${y}`;
+};
+
 // ── Expiry status ───────────────────────────────────────────────────────────
 
 /**

@@ -11,6 +11,7 @@ import Dashboard from './features/dashboard/pages/Dashboard';
 import NotFound from './pages/NotFound';
 import Tasks from './features/tasks/pages/Tasks';
 import Clients from './features/clients/pages/Clients';
+import Inventory from './features/inventory/pages/Inventory';
 import Calendar from './features/calendar/pages/Calendar';
 import Team from './features/team/pages/Team';
 import Profile from './features/profile/pages/Profile';
@@ -30,6 +31,7 @@ const App: React.FC = () => {
                   <Route path="/calendar" element={<Calendar />} />
                   <Route path="/tasks" element={<Tasks />} />
                   <Route path="/clients" element={<Clients />} />
+                  <Route path="/inventory" element={<Inventory />} />
                   <Route path="/team" element={<Team />} />
                   <Route path="/profile" element={<Profile />} />
                 </Route>
