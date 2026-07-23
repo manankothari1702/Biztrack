@@ -178,10 +178,24 @@ Query: `includeEmpty?` (default false — zero-quantity batches hidden). Respons
 Used by the SALE batch picker. Batches are **not** created via a direct endpoint — they are
 created/merged by purchase invoices (and Excel import).
 
-### `GET /batches?expiringInDays=30` · `GET /batches?status=expired`
+### `GET /batches`
+Query: `expiringInDays?`, `status?` (`expired`), `productId?`, `includeEmpty?`, `limit?`,
+`nextToken?`.
+
 Range queries over `GSI6-InventoryDate` (`invDate` = the batch's `expiryDate`), filtered
 with `begins_with(SK, 'BATCH#')`: `expiringInDays=N` → `invDate BETWEEN today AND today+N`;
-`status=expired` → `invDate < today`. Both return only `quantity > 0` batches. Response `200`:
+`status=expired` → `invDate < today`; neither → every batch, soonest expiry first.
+"Today" is resolved in the user's timezone (`User.timezone`, default `Asia/Kolkata`), not
+UTC — the two disagree for five and a half hours of every day.
+
+**`includeEmpty`** (default `false`, accepts `true` or `1`): zero-quantity batches are
+hidden unless asked for. They are retained server-side as history — movement records
+reference a batch by `(productId, expiryDate)`, so deleting the row would orphan the audit
+trail (Data Model §3) — but an emptied lot is not an expiry problem and must not appear in
+an alert count or a batch picker. The Inventory batch table's "Show empty batches" toggle
+is the one caller that opts in.
+
+Response `200`:
 ```json
 { "batches": [ { "id": "...", "productId": "...", "productName": "...", "expiryDate": "2026-08-05", "quantity": 8 } ], "nextToken": null }
 ```

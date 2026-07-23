@@ -91,8 +91,18 @@ const listBatchesByExpiry = async (
     // "Today" must be the user's calendar day, not the Lambda's UTC one.
     const today = todayIso(timeZone);
 
-    const values: Record<string, unknown> = { ':pk': `USER#${uid}`, ':prefix': 'BATCH#', ':zero': 0 };
-    const names:  Record<string, string>  = { '#qty': 'quantity' };
+    // Emptied lots are retained as history (movement records reference them by
+    // (productId, expiryDate)) and hidden by default. `includeEmpty` opts in —
+    // the inventory batch table uses it for its "Show empty batches" toggle.
+    // Matches how tasks.ts reads its boolean flags.
+    const includeEmpty = q.includeEmpty === '1' || q.includeEmpty === 'true';
+
+    // Built conditionally, NOT seeded up front: DynamoDB rejects a request whose
+    // ExpressionAttributeNames/Values contain an entry no expression references
+    // ("Value provided in ExpressionAttributeNames unused in expressions"). So
+    // `#qty` and `:zero` may only exist when the quantity filter does.
+    const values: Record<string, unknown> = { ':pk': `USER#${uid}`, ':prefix': 'BATCH#' };
+    const names:  Record<string, string>  = {};
 
     let keyCondition: string;
     if (q.status === 'expired') {
@@ -112,9 +122,13 @@ const listBatchesByExpiry = async (
         keyCondition = 'PK = :pk';
     }
 
-    // Emptied batches are kept as history (movements reference them) but never
-    // surface in an alert or a picker.
-    const filterParts = ['begins_with(SK, :prefix)', '#qty > :zero'];
+    const filterParts = ['begins_with(SK, :prefix)'];
+
+    if (!includeEmpty) {
+        filterParts.push('#qty > :zero');
+        names['#qty']  = 'quantity';
+        values[':zero'] = 0;
+    }
 
     if (q.productId) {
         filterParts.push('productId = :productId');
@@ -127,7 +141,7 @@ const listBatchesByExpiry = async (
         KeyConditionExpression:    keyCondition,
         FilterExpression:          filterParts.join(' AND '),
         ExpressionAttributeValues: values,
-        ExpressionAttributeNames:  names,
+        ExpressionAttributeNames:  Object.keys(names).length ? names : undefined,
         Limit:                     pageSize,
         ExclusiveStartKey:         lastKey,
         ScanIndexForward:          true,   // invDate ascending -> soonest first
