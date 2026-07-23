@@ -142,6 +142,9 @@ export type ExpiryStatus = 'Expired' | 'Expiring Soon' | 'OK';
 
 export type MovementType = 'IN' | 'OUT' | 'ADJUST' | 'WRITE_OFF';
 
+/** Reasons accepted by `POST /batches/{productId}/{expiry}/write-off`. */
+export type WriteOffReason = 'Expired' | 'Damaged' | 'Other';
+
 /**
  * Catalogue item. Stock does NOT live here — it lives on Batch rows.
  * `totalQuantity` and `earliestExpiry` are caches the server maintains

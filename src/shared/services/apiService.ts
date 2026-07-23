@@ -1,6 +1,9 @@
 import { fetchAuthSession } from 'aws-amplify/auth';
 import { API_URL } from '../lib/aws';
-import type { Client, Task, FlatOrgNode, User, AccountDeletionResponse } from '../types';
+import type {
+    Client, Task, FlatOrgNode, User, AccountDeletionResponse,
+    Product, Batch, StockMovement, MovementType, WriteOffReason,
+} from '../types';
 
 export const PENDING_DELETION_EVENT = 'biztrack:account-pending-deletion';
 
@@ -177,6 +180,196 @@ export const tasksApi = {
 
     delete: (id: string): Promise<void> =>
         request<void>(`tasks/${id}`, { method: 'DELETE' }),
+};
+
+// ── Products ─────────────────────────────────────────────────────────────────
+
+export interface ProductsResponse {
+    products: Product[];
+    nextToken: string | null;
+    count: number;
+}
+
+export interface ProductFilters {
+    search?: string;
+    category?: string;
+    /** 'In Stock' | 'Low Stock' | 'Out of Stock' — derived server-side from totalQuantity vs reorderLevel. */
+    stockStatus?: string;
+    /** Products whose cached earliestExpiry falls in today … today+N. */
+    expiringInDays?: number;
+    /**
+     * `'expired'` — earliestExpiry < today. Distinct from expiringInDays, which
+     * cannot express the past; this is what the dashboard's Expired card links to.
+     */
+    status?: 'expired';
+    /** 'name' | 'stockNo' | 'quantity' | 'value' | 'expiry'. Orders the returned page. */
+    sortBy?: string;
+    limit?: number;
+    nextToken?: string;
+}
+
+export interface BatchesResponse {
+    batches: Batch[];
+    nextToken: string | null;
+}
+
+/** Rows that actually persisted, not rows attempted — see the bulk contract. */
+export interface BulkProductsResult {
+    imported: number;   // created
+    updated: number;    // matched an existing stockNo
+    requested: number;
+    failed: number;
+    timedOut: boolean;
+}
+
+export const productsApi = {
+    list: (filters: ProductFilters = {}): Promise<ProductsResponse> => {
+        const params = new URLSearchParams();
+        if (filters.search)         params.set('search', filters.search);
+        if (filters.category && filters.category !== 'All') params.set('category', filters.category);
+        if (filters.stockStatus && filters.stockStatus !== 'All') params.set('stockStatus', filters.stockStatus);
+        if (filters.expiringInDays !== undefined) params.set('expiringInDays', String(filters.expiringInDays));
+        if (filters.status)         params.set('status', filters.status);
+        if (filters.sortBy)         params.set('sortBy', filters.sortBy);
+        if (filters.limit)          params.set('limit', String(filters.limit));
+        if (filters.nextToken)      params.set('nextToken', filters.nextToken);
+        const qs = params.toString();
+        return request<ProductsResponse>(`products${qs ? `?${qs}` : ''}`);
+    },
+
+    get: (id: string): Promise<Product> =>
+        request<Product>(`products/${encodeURIComponent(id)}`),
+
+    add: (product: Product): Promise<Product> =>
+        request<Product>('products', { method: 'POST', body: JSON.stringify(product) }),
+
+    // Catalogue fields only. totalQuantity / earliestExpiry / invDate are dropped
+    // server-side and restored from the stored row — a rename can never move stock.
+    update: (product: Product): Promise<Product> =>
+        request<Product>(`products/${encodeURIComponent(product.id)}`, {
+            method: 'PUT', body: JSON.stringify(product),
+        }),
+
+    delete: (id: string): Promise<void> =>
+        request<void>(`products/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+    // Upsert matched on a normalized stockNo. Never touches batches or stock.
+    // Two rows normalizing to one stockNo are rejected with 400 VALIDATION + row index.
+    bulkAdd: (products: Product[]): Promise<BulkProductsResult> =>
+        request<BulkProductsResult>('products/bulk', {
+            method: 'POST', body: JSON.stringify({ products }),
+        }),
+
+    bulkDelete: (ids: string[]): Promise<{ deleted: number; requested: number; timedOut: boolean }> =>
+        request<{ deleted: number; requested: number; timedOut: boolean }>('products/bulk', {
+            method: 'DELETE', body: JSON.stringify({ ids }),
+        }),
+
+    /** One product's batches — the sale batch picker's source. Empty batches hidden by default. */
+    batches: (id: string, includeEmpty = false): Promise<BatchesResponse> => {
+        const params = new URLSearchParams();
+        if (includeEmpty) params.set('includeEmpty', 'true');
+        const qs = params.toString();
+        return request<BatchesResponse>(`products/${encodeURIComponent(id)}/batches${qs ? `?${qs}` : ''}`);
+    },
+};
+
+// ── Batches ──────────────────────────────────────────────────────────────────
+
+export interface BatchFilters {
+    /** Expiring in today … today+N, over GSI6-InventoryDate. */
+    expiringInDays?: number;
+    /** `'expired'` — invDate < today. */
+    status?: 'expired';
+    productId?: string;
+    limit?: number;
+    nextToken?: string;
+}
+
+export interface AdjustBatchBody {
+    /** ABSOLUTE on-hand count — the server derives the delta. */
+    quantity: number;
+    /** Changing this re-keys the batch: the stock moves rows, merging if the target exists. */
+    expiryDate?: string;
+    note?: string;
+}
+
+export interface WriteOffResult {
+    batch: Batch;
+    writtenOff: number;
+}
+
+// Path params are encoded because these routes carry TWO dynamic segments; an
+// unencoded value containing a slash would silently re-route the request.
+const batchPath = (productId: string, expiry: string): string =>
+    `batches/${encodeURIComponent(productId)}/${encodeURIComponent(expiry)}`;
+
+export const batchesApi = {
+    list: (filters: BatchFilters = {}): Promise<BatchesResponse> => {
+        const params = new URLSearchParams();
+        if (filters.expiringInDays !== undefined) params.set('expiringInDays', String(filters.expiringInDays));
+        if (filters.status)    params.set('status', filters.status);
+        if (filters.productId) params.set('productId', filters.productId);
+        if (filters.limit)     params.set('limit', String(filters.limit));
+        if (filters.nextToken) params.set('nextToken', filters.nextToken);
+        const qs = params.toString();
+        return request<BatchesResponse>(`batches${qs ? `?${qs}` : ''}`);
+    },
+
+    expiring: (days = 30): Promise<BatchesResponse> =>
+        batchesApi.list({ expiringInDays: days }),
+
+    expired: (): Promise<BatchesResponse> =>
+        batchesApi.list({ status: 'expired' }),
+
+    /** Manual correction. Writes an ADJUST movement; may re-key. 409 if the batch moved in flight. */
+    adjust: (productId: string, expiry: string, body: AdjustBatchBody): Promise<Batch> =>
+        request<Batch>(batchPath(productId, expiry), { method: 'PUT', body: JSON.stringify(body) }),
+
+    /** Zeroes the batch and writes a WRITE_OFF movement. 409 BATCH_EMPTY if already zero. */
+    writeOff: (
+        productId: string,
+        expiry: string,
+        reason: WriteOffReason,
+        note?: string,
+    ): Promise<WriteOffResult> =>
+        request<WriteOffResult>(`${batchPath(productId, expiry)}/write-off`, {
+            method: 'POST', body: JSON.stringify({ reason, note }),
+        }),
+};
+
+// ── Stock movements (read-only audit) ────────────────────────────────────────
+//
+// There is no create/update/delete. Movements are written server-side, inside
+// the transaction that moves the batch and the product roll-up.
+
+export interface StockMovementsResponse {
+    movements: StockMovement[];
+    nextToken: string | null;
+}
+
+export interface StockMovementFilters {
+    productId?: string;
+    type?: MovementType;
+    /** Date (`2026-07-22`) or full timestamp; a bare date covers that whole day. */
+    from?: string;
+    to?: string;
+    limit?: number;
+    nextToken?: string;
+}
+
+export const stockApi = {
+    list: (filters: StockMovementFilters = {}): Promise<StockMovementsResponse> => {
+        const params = new URLSearchParams();
+        if (filters.productId) params.set('productId', filters.productId);
+        if (filters.type)      params.set('type', filters.type);
+        if (filters.from)      params.set('from', filters.from);
+        if (filters.to)        params.set('to', filters.to);
+        if (filters.limit)     params.set('limit', String(filters.limit));
+        if (filters.nextToken) params.set('nextToken', filters.nextToken);
+        const qs = params.toString();
+        return request<StockMovementsResponse>(`stock-movements${qs ? `?${qs}` : ''}`);
+    },
 };
 
 // ── Dashboard ────────────────────────────────────────────────────────────────
