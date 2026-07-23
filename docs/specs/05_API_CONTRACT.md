@@ -303,11 +303,54 @@ Response `200`: `{ "movements": StockMovement[], "nextToken": string|null }`.
 leads the sort key (`STOCKMOVE#<createdAt>#<id>`), the range is answered by a key
 condition rather than a filter — only the rows in the window are read.
 
-**Read-only: `POST`, `PUT` and `DELETE` return `405 METHOD_NOT_ALLOWED`** (with an `Allow:
-GET` header). Movements are written exclusively by the stock engine, inside the same
-transaction that moves the batch and the product roll-up. That coupling is the guarantee
-— a movement cannot exist without the stock change it records, or the reverse — and an
+**Read-only.** Movements are written exclusively by the stock engine, inside the same
+transaction that moves the batch and the product roll-up. That coupling is the guarantee —
+a movement cannot exist without the stock change it records, or the reverse — and an
 endpoint that accepted client-created movements would break it silently.
+
+### What a write attempt actually returns: `403`, not `405`
+
+Only `GET` and `OPTIONS` are wired on `/stock-movements` in API Gateway. An unrouted verb
+is therefore rejected **at the routing layer, before the Lambda is invoked**, so the
+handler's own `405` is never what a client sees. Verified against the deployed stack
+2026-07-23:
+
+| Request | Response |
+|---------|----------|
+| `POST /stock-movements` with a valid `Authorization` header | `403` · `x-amzn-errortype: IncompleteSignatureException` · body complains about missing `Credential` / `Signature` / `SignedHeaders` |
+| `POST /stock-movements` with no `Authorization` header | `403 {"message":"Missing Authentication Token"}` |
+
+Neither message is about the method, which makes them confusing on first read. Both are
+**standard API Gateway behaviour for any unrouted method on any endpoint** — nothing
+specific to this one. With no method configured, API Gateway falls through to its IAM
+(SigV4) path: absent a header it reports "Missing Authentication Token"; present but
+holding a Cognito JWT rather than a SigV4 signature, it reports the signature as
+malformed. Expect exactly the same from, say, `PATCH /products`.
+
+### The handler's `405` is deliberate — do not delete it as dead code
+
+`stockMovements.ts` answers any non-`GET` with `405 METHOD_NOT_ALLOWED` and an
+`Allow: GET` header. Confirmed reachable by invoking the function directly:
+
+```
+$ aws lambda invoke --function-name biztrack-stock-movements --payload '{"httpMethod":"POST",...}'
+405   Allow: GET
+{"error":"METHOD_NOT_ALLOWED","message":"Stock movements are written by the system when
+ stock changes; they cannot be created, edited or deleted directly"}
+```
+
+It is unreachable *through API Gateway today*, and it is kept anyway, for two reasons:
+
+1. **Direct invocation** — console tests, the AWS CLI, or any future non-API-Gateway
+   caller (an EventBridge target, a Step Functions task) reaches the handler directly and
+   gets a correct, self-explaining refusal instead of a stack trace or a silent 200.
+2. **Route widening is a one-line change.** If anyone ever adds `POST` to the resource in
+   `biztrack-stack.ts` — deliberately or by copying a block from `/products` — the `405`
+   is what stops a write from being accepted. Removing it now would turn that future
+   one-line mistake into a data-integrity bug.
+
+Read this the other way round: **the 403 is the accident of the current routing, and the
+405 is the intended contract.** Keep them consistent by leaving the handler alone.
 
 ---
 

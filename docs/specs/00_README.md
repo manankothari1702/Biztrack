@@ -12,6 +12,7 @@ No code is written yet; these define the build.
 | 05 | `05_API_CONTRACT.md` | Endpoints, request/response shapes, auth, errors |
 | 06 | `06_UI_REFERENCE.md` | Wireframes + style guide (colors, fonts, components) |
 | 07 | `07_BUILD_PLAN.md` | File-by-file execution list + the spec/repo conflict log |
+| 09 | `09_VERIFICATION.md` | What has been observed working against the deployed stack, per phase |
 
 ### Deeper implementation detail
 - `../../INVENTORY_FEATURE_BLUEPRINT.md` — file-by-file inventory build spec
