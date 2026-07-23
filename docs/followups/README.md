@@ -167,6 +167,43 @@ from the verified token. See the **Local development** section of the root `READ
 > prod stack and would widen the live allowlist for the duration — see the deploy note in
 > "Owner gates" above.
 
+### FU-B9 · Lambda runtime `nodejs20.x` is deprecated — hard deadline  → surfaced 2026-07-23
+
+**This one has a date on it.** Every function runs `nodejs20.x`, which AWS deprecated on
+**2026-04-30**. From the CDK synth warning:
+
+```
+Runtime 'nodejs20.x' was deprecated on '2026-04-30'.
+Creation was disabled on '2027-02-01' and update on '2027-03-03'.
+Please consider updating to 'nodejs24.x'
+```
+
+So **after 2027-03-03 you cannot deploy a code change to any existing function** — roughly
+seven months out. Independently, the AWS SDK v3 logs on every cold start:
+
+```
+versions published after the first week of January 2027 will require node >=22.
+You are running node v20.20.2.
+```
+
+Fix: one line in `infra/lib/biztrack-stack.ts` (`lambdaDefaults.runtime`) to
+`lambda.Runtime.NODEJS_22_X` or `NODEJS_24_X`, redeploy, re-run the per-endpoint checks.
+Cheap now, urgent later, impossible to do in a hurry once the update window closes.
+Note CDK already moved its own internal helper to `nodejs24.x` in 2.262.0.
+
+### FU-B10 · Remaining `infra/` advisories are dev-only  → surfaced 2026-07-23
+
+`npm audit` in `infra/` reports 3 (1 low, 2 high) after the aws-cdk-lib bump:
+`@babel/core` (arbitrary file read via sourceMappingURL), `brace-expansion` (DoS), and
+`js-yaml` (quadratic CPU on merge-key chains).
+
+All transitive under `jest` / `ts-jest`, or under `aws-cdk-lib`'s own `minimatch`. **Nothing
+from `infra/node_modules` is deployed** — `infra`'s only production dependencies are
+`aws-cdk-lib` and `constructs`, and what ships to AWS is the `lambda/` asset. These run at
+test and synth time on a trusted machine against trusted input, so the practical risk is
+low. `npm audit fix` clears them via routine jest/ts-jest patch bumps; folded into the next
+dependency pass rather than done piecemeal.
+
 ### FU-B8 · gstack upgrade + skipped setup prompts  → tooling, surfaced 2026-07-23
 
 **Not blocking anything.** Deferred until Phase 3 closes, to avoid changing tooling
@@ -190,9 +227,18 @@ One side effect already landed: the browse tooling appended `.gstack/` to the re
 `.gitignore`. Correct (gstack state should not be committed) but authored by the tool, not
 by a person — left uncommitted for a human to accept.
 
-### FU-B7 · `axios` / `form-data` advisories in `lambda/`  → pre-existing, surfaced 2026-07-22
+### FU-B7 · ~~`axios` / `form-data` advisories in `lambda/`~~ — RESOLVED 2026-07-23
 
-`npm audit --omit=dev` in `lambda/` reports **2 high** advisories in **production** dependencies:
+**Fixed and deployed.** `axios` 1.16.0 → 1.18.1 and `form-data` 4.0.5 → 4.0.6;
+`npm audit --omit=dev` now reports **0**. `form-data` needed a second step — axios 1.18.1
+declares `^4.0.5` and the lockfile had pinned exactly 4.0.5, still inside the vulnerable
+range, so `npm update form-data` moved it within axios's own range (no override needed).
+Verified by downloading the deployed artifact and reading both versions out of the live
+zip. Original write-up kept below for context.
+
+---
+
+`npm audit --omit=dev` in `lambda/` reported **2 high** advisories in **production** dependencies:
 
 - **`axios` 1.0.0–1.17.0** — ten advisories: DoS via recursion in `formDataToJSON`, prototype
   pollution (auth subfields / request construction / nested options), `maxBodyLength` bypasses
