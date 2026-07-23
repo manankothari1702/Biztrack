@@ -167,29 +167,30 @@ from the verified token. See the **Local development** section of the root `READ
 > prod stack and would widen the live allowlist for the duration — see the deploy note in
 > "Owner gates" above.
 
-### FU-B9 · Lambda runtime `nodejs20.x` is deprecated — hard deadline  → surfaced 2026-07-23
+### FU-B9 · ~~Lambda runtime `nodejs20.x` is deprecated~~ — RESOLVED 2026-07-23
 
-**This one has a date on it.** Every function runs `nodejs20.x`, which AWS deprecated on
-**2026-04-30**. From the CDK synth warning:
+**Fixed and deployed.** All 11 functions moved `nodejs20.x` → **`nodejs24.x`**; execution
+environment reports `nodejs:24.v48`, and the AWS SDK's node-version warning is gone.
 
-```
-Runtime 'nodejs20.x' was deprecated on '2026-04-30'.
-Creation was disabled on '2027-02-01' and update on '2027-03-03'.
-Please consider updating to 'nodejs24.x'
-```
+Runway bought, from AWS's published table (checked 2026-07-23):
 
-So **after 2027-03-03 you cannot deploy a code change to any existing function** — roughly
-seven months out. Independently, the AWS SDK v3 logs on every cold start:
+| Runtime | Deprecation | Block create | **Block update** |
+|---------|-------------|--------------|------------------|
+| `nodejs20.x` *(was)* | 2026-04-30 | 2027-02-01 | **2027-03-03** |
+| `nodejs22.x` | 2027-04-30 | 2027-06-01 | **2027-07-01** |
+| `nodejs24.x` *(now)* | 2028-04-30 | 2028-06-01 | **2028-07-01** |
 
-```
-versions published after the first week of January 2027 will require node >=22.
-You are running node v20.20.2.
-```
+24 over 22 because it buys a full extra year on the date that actually bites — the one
+after which no code change can be deployed to an existing function — at no cost: every
+`@aws-sdk` package declares `node >=20.0.0`, `axios` declares no engine, and no transitive
+dependency sets an upper bound. Both are Amazon Linux 2023.
 
-Fix: one line in `infra/lib/biztrack-stack.ts` (`lambdaDefaults.runtime`) to
-`lambda.Runtime.NODEJS_22_X` or `NODEJS_24_X`, redeploy, re-run the per-endpoint checks.
-Cheap now, urgent later, impossible to do in a hurry once the update window closes.
-Note CDK already moved its own internal helper to `nodejs24.x` in 2.262.0.
+The Docker bundling fallback image moved with it, so builds and runtime stay on one Node
+major. `infra/test/infra.test.ts` now asserts *no function runs a deprecated runtime* and
+*all 11 share one runtime*, rather than pinning a version string — the previous test
+hardcoded `nodejs20.x` and had to be hand-edited for this bump.
+
+**Next Node deadline: 2028-07-01.** Node.js 26 lands on Lambda around November 2026.
 
 ### FU-B10 · Remaining `infra/` advisories are dev-only  → surfaced 2026-07-23
 

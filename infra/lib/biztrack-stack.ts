@@ -285,7 +285,9 @@ export class BiztrackStack extends cdk.Stack {
             ? lambda.Code.fromAsset(lambdaRoot, {
                 assetHashType: cdk.AssetHashType.OUTPUT,
                 bundling: {
-                    image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+                    // Kept on the same Node major as the runtime above, so the
+                    // Docker fallback path builds against what the code runs on.
+                    image: lambda.Runtime.NODEJS_24_X.bundlingImage,
                     command: [
                         'bash', '-c',
                         'cp -r dist package.json package-lock.json /asset-output/ '
@@ -316,8 +318,23 @@ export class BiztrackStack extends cdk.Stack {
               })
             : lambda.Code.fromInline('exports.handler = async () => ({ statusCode: 200 })');
 
+        // Runtime choice (2026-07-23). AWS's published schedule:
+        //
+        //   nodejs20.x   deprecated 2026-04-30 · updates BLOCKED 2027-03-03
+        //   nodejs22.x   deprecates  2027-04-30 · updates blocked 2027-07-01
+        //   nodejs24.x   deprecates  2028-04-30 · updates blocked 2028-07-01
+        //
+        // 24 over 22 because it buys a full extra year on the date that actually
+        // hurts — the one after which no code change can be deployed to an
+        // existing function — at no cost: every @aws-sdk package declares
+        // `node >=20.0.0`, axios declares no engine, and no transitive dependency
+        // sets an upper bound. Both are Amazon Linux 2023. CDK itself moved its
+        // internal S3AutoDeleteObjects helper to nodejs24.x in 2.262.0.
+        //
+        // The AWS SDK also warns that releases after early Jan 2027 will require
+        // node >=22, which 24 satisfies and 20 does not.
         const lambdaDefaults = {
-            runtime:     lambda.Runtime.NODEJS_20_X,
+            runtime:     lambda.Runtime.NODEJS_24_X,
             role:        lambdaRole,
             timeout:     cdk.Duration.seconds(29),
             memorySize:  256,

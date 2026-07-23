@@ -98,10 +98,12 @@ describe('inventory Lambda functions', () => {
         ['biztrack-batches',         'dist/batches.handler'],
         ['biztrack-stock-movements', 'dist/stockMovements.handler'],
     ])('%s is wired to %s', (functionName, handler) => {
+        // Deliberately does NOT assert the runtime — see the runtime describe
+        // block below, which checks it once for every function instead of
+        // repeating a version string that goes stale on each Node bump.
         template.hasResourceProperties('AWS::Lambda::Function', {
             FunctionName: functionName,
             Handler:      handler,
-            Runtime:      'nodejs20.x',
         });
     });
 
@@ -136,6 +138,40 @@ describe('inventory Lambda functions', () => {
             'biztrack-whatsapp-scheduler',
             'biztrack-whatsapp-test',
         ]);
+    });
+});
+
+describe('Lambda runtime', () => {
+    // AWS blocks UPDATES to functions on a deprecated runtime, so drifting past
+    // a deprecation date is not a warning — it is the day you can no longer
+    // deploy a fix. These assert the property that matters (nothing deprecated,
+    // nothing inconsistent) rather than pinning a version string that has to be
+    // hand-edited on every bump, which is what the previous test did.
+    //
+    // Dates from https://docs.aws.amazon.com/lambda/latest/dg/lambda-runtimes.html
+    // (checked 2026-07-23). Add to this list as runtimes reach deprecation.
+    const DEPRECATED = [
+        'nodejs14.x', 'nodejs16.x', 'nodejs18.x',
+        'nodejs20.x',   // deprecated 2026-04-30, updates blocked 2027-03-03
+    ];
+
+    const biztrackRuntimes = () =>
+        Object.values(template.findResources('AWS::Lambda::Function'))
+            .filter(fn => String(fn.Properties?.FunctionName ?? '').startsWith('biztrack-'))
+            .map(fn => String(fn.Properties?.Runtime));
+
+    test('no function runs a deprecated runtime', () => {
+        const offenders = biztrackRuntimes().filter(r => DEPRECATED.includes(r));
+        expect(offenders).toEqual([]);
+    });
+
+    test('every function shares one runtime — no accidental drift', () => {
+        const distinct = [...new Set(biztrackRuntimes())];
+        expect(distinct).toHaveLength(1);
+    });
+
+    test('all 11 are covered by that check', () => {
+        expect(biztrackRuntimes()).toHaveLength(11);
     });
 });
 
