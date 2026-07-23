@@ -64,6 +64,17 @@ describe('batchParams', () => {
     it('keeps expiringInDays=0', () => {
         expect(qs(batchParams({ expiringInDays: 0 }))).toBe('expiringInDays=0');
     });
+
+    it('sends includeEmpty only when true — false is the server default', () => {
+        expect(qs(batchParams({ includeEmpty: true }))).toBe('includeEmpty=true');
+        expect(qs(batchParams({ includeEmpty: false }))).toBe('');
+        expect(qs(batchParams({}))).toBe('');
+    });
+
+    it('combines includeEmpty with an expiry window', () => {
+        expect(qs(batchParams({ expiringInDays: 30, includeEmpty: true })))
+            .toBe('expiringInDays=30&includeEmpty=true');
+    });
 });
 
 describe('stockMovementParams', () => {

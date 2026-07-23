@@ -40,6 +40,12 @@ export interface BatchFilters {
     /** `'expired'` — invDate < today. */
     status?: 'expired';
     productId?: string;
+    /**
+     * Include zero-quantity lots. Default false — they are retained server-side
+     * as history (movements reference them) but are not an expiry problem, so
+     * they stay out of alert counts and pickers.
+     */
+    includeEmpty?: boolean;
     limit?: number;
     nextToken?: string;
 }
@@ -77,6 +83,9 @@ export const batchParams = (filters: BatchFilters = {}): URLSearchParams => {
     if (filters.expiringInDays !== undefined) params.set('expiringInDays', String(filters.expiringInDays));
     if (filters.status)    params.set('status', filters.status);
     if (filters.productId) params.set('productId', filters.productId);
+    // Only sent when true — false is the server default, so omitting it keeps
+    // the query string short and the intent obvious in a network log.
+    if (filters.includeEmpty) params.set('includeEmpty', 'true');
     if (filters.limit)     params.set('limit', String(filters.limit));
     if (filters.nextToken) params.set('nextToken', filters.nextToken);
     return params;

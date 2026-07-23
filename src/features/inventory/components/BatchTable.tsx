@@ -50,27 +50,17 @@ const BatchTable: React.FC<BatchTableProps> = ({
                     <p className="text-xs text-slate-400 mt-0.5">Sorted soonest expiry first</p>
                 </div>
                 {/*
-                  * DISABLED until GET /batches accepts includeEmpty.
-                  *
-                  * The endpoint filters `quantity > 0` server-side and has no
-                  * opt-out (05_API_CONTRACT §2 states it that way), so emptied
-                  * lots never reach the client and there is nothing for this
-                  * toggle to reveal. 06_UI_REFERENCE §2 does specify the
-                  * control, so it stays visible-but-disabled rather than being
-                  * silently dropped — a checkbox that ticks and does nothing is
-                  * worse than one that explains itself. Re-enable by deleting
-                  * `disabled` and the title once the param exists.
+                  * Emptied lots are hidden by default and fetched only when this
+                  * is on — GET /batches filters `quantity > 0` unless
+                  * includeEmpty is set (05_API_CONTRACT §2). The rows are kept
+                  * server-side because movement records reference them.
                   */}
-                <label
-                    className="flex items-center gap-2 text-xs font-medium text-slate-400 cursor-not-allowed select-none"
-                    title="Needs includeEmpty support on GET /batches — the endpoint currently filters emptied lots out server-side."
-                >
+                <label className="flex items-center gap-2 text-xs font-medium text-slate-600 cursor-pointer select-none">
                     <input
                         type="checkbox"
                         checked={includeEmpty}
-                        disabled
                         onChange={e => onToggleIncludeEmpty(e.target.checked)}
-                        className="w-4 h-4 rounded border-slate-300 text-primary cursor-not-allowed"
+                        className="w-4 h-4 rounded border-slate-300 text-primary focus:ring-primary/20 cursor-pointer"
                     />
                     Show empty batches
                 </label>

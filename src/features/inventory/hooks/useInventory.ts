@@ -21,6 +21,8 @@ export const useInventory = (
     page = 1,
     pageSize = 50,
     soonDays = 30,
+    /** Fetch zero-quantity lots too — drives the batch table's toggle. */
+    includeEmpty = false,
 ) => {
     const { currentUser } = useAuth();
 
@@ -62,6 +64,7 @@ export const useInventory = (
                     async (nextToken) => {
                         const res = await batchesApi.list({
                             ...toBatchFilters(state, soonDays),
+                            ...(includeEmpty ? { includeEmpty: true } : {}),
                             limit: 200,
                             ...(nextToken ? { nextToken } : {}),
                         });
@@ -80,7 +83,7 @@ export const useInventory = (
         } finally {
             if (version === versionRef.current) setLoading(false);
         }
-    }, [currentUser, search, category, stockStatus, expiry, sortBy, pageSize, soonDays]);
+    }, [currentUser, search, category, stockStatus, expiry, sortBy, pageSize, soonDays, includeEmpty]);
 
     useEffect(() => { void fetchInventory(); }, [fetchInventory]);
 

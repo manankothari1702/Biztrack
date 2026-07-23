@@ -41,7 +41,7 @@ const Inventory: React.FC = () => {
     const {
         products, allProducts, batches, totalFetched, loading, error,
         refresh, addProduct, updateProduct, deleteProduct, adjustBatch, writeOffBatch,
-    } = useInventory(filters, page, ITEMS_PER_PAGE);
+    } = useInventory(filters, page, ITEMS_PER_PAGE, 30, includeEmpty);
 
     const { stats, loading: statsLoading, refresh: refreshStats } = useInventoryStats(timeZone);
 
