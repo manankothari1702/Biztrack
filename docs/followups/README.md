@@ -167,6 +167,29 @@ from the verified token. See the **Local development** section of the root `READ
 > prod stack and would widen the live allowlist for the duration — see the deploy note in
 > "Owner gates" above.
 
+### FU-B8 · gstack upgrade + skipped setup prompts  → tooling, surfaced 2026-07-23
+
+**Not blocking anything.** Deferred until Phase 3 closes, to avoid changing tooling
+mid-build.
+
+`gstack-update-check` reports **1.42.2.0 → 1.60.1.0** available. Upgrade with
+`/gstack-upgrade` (or read `~/.claude/skills/gstack/gstack-upgrade/SKILL.md`).
+
+The `/browse` preamble also queues one-time setup prompts that were skipped rather than
+interrupting the build with five config questions. They will reappear on the next gstack
+skill invocation:
+
+| Prompt | State | Effect if left alone |
+|--------|-------|----------------------|
+| Telemetry opt-in | unanswered (`TELEMETRY: off`) | stays off |
+| Proactive skill suggestions | unanswered | stays on (default) |
+| Skill routing rules in `CLAUDE.md` | declined-by-omission | skills still work; must be invoked explicitly |
+| "Boil the Lake" intro | unseen | cosmetic |
+
+One side effect already landed: the browse tooling appended `.gstack/` to the repo's
+`.gitignore`. Correct (gstack state should not be committed) but authored by the tool, not
+by a person — left uncommitted for a human to accept.
+
 ### FU-B7 · `axios` / `form-data` advisories in `lambda/`  → pre-existing, surfaced 2026-07-22
 
 `npm audit --omit=dev` in `lambda/` reports **2 high** advisories in **production** dependencies:
