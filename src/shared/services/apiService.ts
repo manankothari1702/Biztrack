@@ -2,8 +2,22 @@ import { fetchAuthSession } from 'aws-amplify/auth';
 import { API_URL } from '../lib/aws';
 import type {
     Client, Task, FlatOrgNode, User, AccountDeletionResponse,
-    Product, Batch, StockMovement, MovementType, WriteOffReason,
+    Product, Batch, StockMovement, WriteOffReason,
 } from '../types';
+import {
+    productParams, batchParams, stockMovementParams, suffix,
+} from './apiParams';
+import type {
+    ProductFilters, BatchFilters, StockMovementFilters,
+} from './apiParams';
+
+// Filter shapes live in ./apiParams so they can be unit-tested without loading
+// Amplify (lib/aws calls Amplify.configure on import). Re-exported here so
+// callers keep importing everything API-shaped from one module.
+export type {
+    ProductFilters, BatchFilters, StockMovementFilters,
+    InventoryFilterState,
+} from './apiParams';
 
 export const PENDING_DELETION_EVENT = 'biztrack:account-pending-deletion';
 
@@ -190,24 +204,6 @@ export interface ProductsResponse {
     count: number;
 }
 
-export interface ProductFilters {
-    search?: string;
-    category?: string;
-    /** 'In Stock' | 'Low Stock' | 'Out of Stock' — derived server-side from totalQuantity vs reorderLevel. */
-    stockStatus?: string;
-    /** Products whose cached earliestExpiry falls in today … today+N. */
-    expiringInDays?: number;
-    /**
-     * `'expired'` — earliestExpiry < today. Distinct from expiringInDays, which
-     * cannot express the past; this is what the dashboard's Expired card links to.
-     */
-    status?: 'expired';
-    /** 'name' | 'stockNo' | 'quantity' | 'value' | 'expiry'. Orders the returned page. */
-    sortBy?: string;
-    limit?: number;
-    nextToken?: string;
-}
-
 export interface BatchesResponse {
     batches: Batch[];
     nextToken: string | null;
@@ -223,19 +219,8 @@ export interface BulkProductsResult {
 }
 
 export const productsApi = {
-    list: (filters: ProductFilters = {}): Promise<ProductsResponse> => {
-        const params = new URLSearchParams();
-        if (filters.search)         params.set('search', filters.search);
-        if (filters.category && filters.category !== 'All') params.set('category', filters.category);
-        if (filters.stockStatus && filters.stockStatus !== 'All') params.set('stockStatus', filters.stockStatus);
-        if (filters.expiringInDays !== undefined) params.set('expiringInDays', String(filters.expiringInDays));
-        if (filters.status)         params.set('status', filters.status);
-        if (filters.sortBy)         params.set('sortBy', filters.sortBy);
-        if (filters.limit)          params.set('limit', String(filters.limit));
-        if (filters.nextToken)      params.set('nextToken', filters.nextToken);
-        const qs = params.toString();
-        return request<ProductsResponse>(`products${qs ? `?${qs}` : ''}`);
-    },
+    list: (filters: ProductFilters = {}): Promise<ProductsResponse> =>
+        request<ProductsResponse>(`products${suffix(productParams(filters))}`),
 
     get: (id: string): Promise<Product> =>
         request<Product>(`products/${encodeURIComponent(id)}`),
@@ -276,16 +261,6 @@ export const productsApi = {
 
 // ── Batches ──────────────────────────────────────────────────────────────────
 
-export interface BatchFilters {
-    /** Expiring in today … today+N, over GSI6-InventoryDate. */
-    expiringInDays?: number;
-    /** `'expired'` — invDate < today. */
-    status?: 'expired';
-    productId?: string;
-    limit?: number;
-    nextToken?: string;
-}
-
 export interface AdjustBatchBody {
     /** ABSOLUTE on-hand count — the server derives the delta. */
     quantity: number;
@@ -305,16 +280,8 @@ const batchPath = (productId: string, expiry: string): string =>
     `batches/${encodeURIComponent(productId)}/${encodeURIComponent(expiry)}`;
 
 export const batchesApi = {
-    list: (filters: BatchFilters = {}): Promise<BatchesResponse> => {
-        const params = new URLSearchParams();
-        if (filters.expiringInDays !== undefined) params.set('expiringInDays', String(filters.expiringInDays));
-        if (filters.status)    params.set('status', filters.status);
-        if (filters.productId) params.set('productId', filters.productId);
-        if (filters.limit)     params.set('limit', String(filters.limit));
-        if (filters.nextToken) params.set('nextToken', filters.nextToken);
-        const qs = params.toString();
-        return request<BatchesResponse>(`batches${qs ? `?${qs}` : ''}`);
-    },
+    list: (filters: BatchFilters = {}): Promise<BatchesResponse> =>
+        request<BatchesResponse>(`batches${suffix(batchParams(filters))}`),
 
     expiring: (days = 30): Promise<BatchesResponse> =>
         batchesApi.list({ expiringInDays: days }),
@@ -348,28 +315,9 @@ export interface StockMovementsResponse {
     nextToken: string | null;
 }
 
-export interface StockMovementFilters {
-    productId?: string;
-    type?: MovementType;
-    /** Date (`2026-07-22`) or full timestamp; a bare date covers that whole day. */
-    from?: string;
-    to?: string;
-    limit?: number;
-    nextToken?: string;
-}
-
 export const stockApi = {
-    list: (filters: StockMovementFilters = {}): Promise<StockMovementsResponse> => {
-        const params = new URLSearchParams();
-        if (filters.productId) params.set('productId', filters.productId);
-        if (filters.type)      params.set('type', filters.type);
-        if (filters.from)      params.set('from', filters.from);
-        if (filters.to)        params.set('to', filters.to);
-        if (filters.limit)     params.set('limit', String(filters.limit));
-        if (filters.nextToken) params.set('nextToken', filters.nextToken);
-        const qs = params.toString();
-        return request<StockMovementsResponse>(`stock-movements${qs ? `?${qs}` : ''}`);
-    },
+    list: (filters: StockMovementFilters = {}): Promise<StockMovementsResponse> =>
+        request<StockMovementsResponse>(`stock-movements${suffix(stockMovementParams(filters))}`),
 };
 
 // ── Dashboard ────────────────────────────────────────────────────────────────

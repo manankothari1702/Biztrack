@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Batch, Product } from '../types';
 import {
+    DEFAULT_TIMEZONE,
     EXPIRING_SOON_DAYS,
     addDaysIso,
     batchValue,
@@ -9,6 +10,7 @@ import {
     getExpiryStatus,
     getProductExpiryStatus,
     getStockStatus,
+    inventoryStats,
     inventoryTotals,
     isExpired,
     isLowStock,
@@ -240,6 +242,174 @@ describe('inventoryTotals', () => {
         expect(inventoryTotals([])).toEqual({
             totalUnits: 0, stockValue: 0, vpInStock: 0, productCount: 0,
         });
+    });
+});
+
+describe('inventoryStats', () => {
+    // TODAY = 2026-07-22, soonDays = 30 -> the window closes on 2026-08-21.
+    const stocked = (over: Partial<Product> = {}) =>
+        product({ totalQuantity: 20, reorderLevel: 10, price50: 1246, vp: 21.75, ...over });
+
+    it('returns all zeroes for an empty catalogue', () => {
+        expect(inventoryStats([], [], { today: TODAY })).toEqual({
+            totalUnits: 0, stockValue: 0, vpInStock: 0, productCount: 0,
+            expiringSoon: 0, expired: 0, lowStock: 0, outOfStock: 0,
+        });
+    });
+
+    it('handles products with no batches at all', () => {
+        // A freshly imported catalogue: priced, counted, but nothing on the shelf.
+        const stats = inventoryStats(
+            [product({ totalQuantity: 0 }), product({ totalQuantity: 0 })], [], { today: TODAY });
+        expect(stats.productCount).toBe(2);
+        expect(stats.outOfStock).toBe(2);
+        expect(stats.lowStock).toBe(0);
+        expect(stats.totalUnits).toBe(0);
+        expect(stats.stockValue).toBe(0);
+        expect(stats.expiringSoon).toBe(0);
+        expect(stats.expired).toBe(0);
+    });
+
+    it('treats a product whose batches sum to zero as out of stock, not low', () => {
+        // Every lot emptied. The batch rows survive as history and must not be
+        // counted as an expiry problem.
+        const stats = inventoryStats(
+            [product({ totalQuantity: 0, reorderLevel: 10 })],
+            [
+                batch({ expiryDate: '2026-07-01', quantity: 0 }),   // would be Expired if counted
+                batch({ expiryDate: '2026-08-01', quantity: 0 }),   // would be Expiring Soon if counted
+            ],
+            { today: TODAY },
+        );
+        expect(stats.outOfStock).toBe(1);
+        expect(stats.lowStock).toBe(0);
+        expect(stats.expired).toBe(0);
+        expect(stats.expiringSoon).toBe(0);
+        expect(stats.stockValue).toBe(0);
+    });
+
+    describe('expiry boundaries, resolved against an explicit today', () => {
+        const at = (expiryDate: string) =>
+            inventoryStats([stocked()], [batch({ expiryDate, quantity: 5 })], { today: TODAY });
+
+        it('today counts as expiring soon, not expired — still sellable', () => {
+            expect(at('2026-07-22')).toMatchObject({ expiringSoon: 1, expired: 0 });
+        });
+
+        it('today-1 is expired', () => {
+            expect(at('2026-07-21')).toMatchObject({ expiringSoon: 0, expired: 1 });
+        });
+
+        it('today+30 is the last expiring-soon day', () => {
+            expect(at('2026-08-21')).toMatchObject({ expiringSoon: 1, expired: 0 });
+        });
+
+        it('today+31 is neither', () => {
+            expect(at('2026-08-22')).toMatchObject({ expiringSoon: 0, expired: 0 });
+        });
+
+        it('honours a custom window', () => {
+            const within = inventoryStats([stocked()], [batch({ expiryDate: '2026-07-29', quantity: 5 })],
+                { today: TODAY, soonDays: 7 });
+            const beyond = inventoryStats([stocked()], [batch({ expiryDate: '2026-07-30', quantity: 5 })],
+                { today: TODAY, soonDays: 7 });
+            expect(within.expiringSoon).toBe(1);
+            expect(beyond.expiringSoon).toBe(0);
+        });
+    });
+
+    it("defaults today to the user's timezone, not a UTC slice", () => {
+        // No fixed date here — the point is which clock the default uses.
+        // new Date().toISOString().slice(0,10) is UTC and disagrees with
+        // Asia/Kolkata for 5.5 hours of every day, which would mis-band a lot
+        // expiring today or yesterday.
+        const todayLocal = todayIso(DEFAULT_TIMEZONE);
+        const yesterdayLocal = addDaysIso(todayLocal, -1);
+
+        expect(inventoryStats([stocked()], [batch({ expiryDate: todayLocal, quantity: 5 })]))
+            .toMatchObject({ expiringSoon: 1, expired: 0 });
+        expect(inventoryStats([stocked()], [batch({ expiryDate: yesterdayLocal, quantity: 5 })]))
+            .toMatchObject({ expiringSoon: 0, expired: 1 });
+    });
+
+    it('bands the same batch differently in timezones a day apart', () => {
+        // Kiritimati (UTC+14) and Baker Island (UTC-12) are 26 hours apart, so
+        // they can never share a calendar day. A lot expiring on the earlier of
+        // the two dates is already expired in the later zone.
+        const [earlier, later] = [todayIso('Etc/GMT+12'), todayIso('Pacific/Kiritimati')].sort();
+        const lot = [batch({ expiryDate: earlier, quantity: 5 })];
+
+        expect(inventoryStats([stocked()], lot, { today: earlier }))
+            .toMatchObject({ expiringSoon: 1, expired: 0 });
+        expect(inventoryStats([stocked()], lot, { today: later }))
+            .toMatchObject({ expiringSoon: 0, expired: 1 });
+    });
+
+    describe('stock banding', () => {
+        it('counts Low Stock at EXACTLY reorderLevel', () => {
+            expect(inventoryStats([product({ totalQuantity: 10, reorderLevel: 10 })], [], { today: TODAY }))
+                .toMatchObject({ lowStock: 1, outOfStock: 0 });
+        });
+
+        it('one unit above reorderLevel is neither low nor out', () => {
+            expect(inventoryStats([product({ totalQuantity: 11, reorderLevel: 10 })], [], { today: TODAY }))
+                .toMatchObject({ lowStock: 0, outOfStock: 0 });
+        });
+
+        it('zero is out of stock, never also low', () => {
+            const stats = inventoryStats([product({ totalQuantity: 0, reorderLevel: 10 })], [], { today: TODAY });
+            expect(stats.outOfStock).toBe(1);
+            expect(stats.lowStock).toBe(0);
+        });
+
+        it('a product is never counted in both bands', () => {
+            const stats = inventoryStats([
+                product({ totalQuantity: 0,  reorderLevel: 10 }),
+                product({ totalQuantity: 10, reorderLevel: 10 }),
+                product({ totalQuantity: 50, reorderLevel: 10 }),
+            ], [], { today: TODAY });
+            expect(stats.lowStock + stats.outOfStock).toBeLessThanOrEqual(stats.productCount);
+            expect(stats).toMatchObject({ lowStock: 1, outOfStock: 1, productCount: 3 });
+        });
+    });
+
+    it('counts expiry per BATCH and stock per PRODUCT', () => {
+        // One product, three lots: two problematic, one fine. That is 2 expiry
+        // alerts (each lot is separately written off), from 1 product.
+        const stats = inventoryStats(
+            [stocked({ totalQuantity: 30 })],
+            [
+                batch({ expiryDate: '2026-07-01', quantity: 5 }),   // expired
+                batch({ expiryDate: '2026-08-01', quantity: 10 }),  // expiring soon
+                batch({ expiryDate: '2027-06-30', quantity: 15 }),  // fine
+            ],
+            { today: TODAY },
+        );
+        expect(stats).toMatchObject({ expired: 1, expiringSoon: 1, productCount: 1 });
+    });
+
+    it('carries the valuation totals through unchanged', () => {
+        const shelf = [
+            product({ totalQuantity: 20, price50: 1246, vp: 21.75 }),
+            product({ totalQuantity: 6,  price50: 712,  vp: 12.45 }),
+        ];
+        const stats = inventoryStats(shelf, [], { today: TODAY });
+        expect(stats).toMatchObject({
+            totalUnits: 26, stockValue: 24920 + 4272, vpInStock: 435 + 74.7, productCount: 2,
+        });
+        expect(stats.stockValue).toBe(inventoryTotals(shelf).stockValue);
+    });
+
+    it('values from the cached product roll-up, not from summing batches', () => {
+        // The two disagree here; the product row is what the server maintains
+        // transactionally and is therefore authoritative.
+        const stats = inventoryStats(
+            [product({ totalQuantity: 20, price50: 100 })],
+            [batch({ quantity: 3 })],
+            { today: TODAY },
+        );
+        expect(stats.stockValue).toBe(2000);
+        expect(stats.totalUnits).toBe(20);
     });
 });
 

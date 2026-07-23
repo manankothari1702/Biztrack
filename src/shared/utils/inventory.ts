@@ -158,6 +158,61 @@ export const inventoryTotals = (
     };
 };
 
+// ── Dashboard / page statistics ─────────────────────────────────────────────
+
+export interface InventoryStats extends InventoryTotals {
+    /** Batches WITH STOCK expiring today … today+soonDays. */
+    expiringSoon: number;
+    /** Batches WITH STOCK already past their expiry — value still counted until written off. */
+    expired: number;
+    /** Products at or below reorderLevel but not yet empty. */
+    lowStock: number;
+    /** Products with no stock at all. Distinct from lowStock, never both. */
+    outOfStock: number;
+}
+
+/**
+ * Everything the valuation cards and alert cards need, in one pass.
+ *
+ * Expiry counts are **per batch**, not per product: a product can hold one
+ * expired lot and three healthy ones, and "1 expired batch" is the actionable
+ * number — it is a batch that gets written off. Stock counts are **per product**,
+ * because reordering is a product-level decision.
+ *
+ * Zero-quantity batches are ignored entirely. They are retained as history
+ * (movement records reference them) but an emptied lot is not an expiry problem.
+ *
+ * Valuation comes from the products' cached `totalQuantity`, not from summing
+ * batches, so it matches what the server considers authoritative.
+ */
+export const inventoryStats = (
+    products: readonly Pick<Product, 'totalQuantity' | 'reorderLevel' | 'price50' | 'vp'>[],
+    batches: readonly Pick<Batch, 'expiryDate' | 'quantity'>[],
+    options: { today?: IsoDate; soonDays?: number } = {},
+): InventoryStats => {
+    const today    = options.today ?? todayIso();
+    const soonDays = options.soonDays ?? EXPIRING_SOON_DAYS;
+
+    let expiringSoon = 0;
+    let expired      = 0;
+    for (const batch of batches) {
+        if (batch.quantity <= 0) continue;
+        const status = getExpiryStatus(batch.expiryDate, soonDays, today);
+        if (status === 'Expired') expired++;
+        else if (status === 'Expiring Soon') expiringSoon++;
+    }
+
+    let lowStock   = 0;
+    let outOfStock = 0;
+    for (const product of products) {
+        const status = getStockStatus(product);
+        if (status === 'Low Stock') lowStock++;
+        else if (status === 'Out of Stock') outOfStock++;
+    }
+
+    return { ...inventoryTotals(products), expiringSoon, expired, lowStock, outOfStock };
+};
+
 // ── Batch ordering ──────────────────────────────────────────────────────────
 
 /**
