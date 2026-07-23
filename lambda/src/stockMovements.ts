@@ -32,6 +32,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         if (event.httpMethod === 'GET') return await listMovements(uid, event);
 
+        // NOT dead code. Unreachable via API Gateway today (only GET/OPTIONS are
+        // routed, so an unrouted verb 403s before this Lambda runs), but it still
+        // answers direct invocations and is what would refuse a write if POST is
+        // ever added to the resource. See 05_API_CONTRACT.md §4.
         return methodNotAllowed(['GET'],
             'Stock movements are written by the system when stock changes; they cannot be created, edited or deleted directly');
     } catch (err) {
