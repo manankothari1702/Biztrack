@@ -113,6 +113,36 @@ second table or stack — you cannot read or write another user's rows.
 `docs/followups/README.md` → *FU-B6* for why a fully separate dev stack is
 deferred rather than done.
 
+### Stop the dev server before `cdk deploy` or `cdk diff`
+
+```bash
+# from the repo root, before deploying
+pkill -f vite            # POSIX
+Stop-Process -Name node  # Windows, if pkill doesn't match
+```
+
+Leaving `npm run dev` running makes CDK fail with:
+
+```
+«FailedToBundleAsset» Failed to bundle asset .../Code/Stage
+Error: EPERM: operation not permitted, rename
+  '...\cdk.out\bundling-temp-<hash>-building' -> '...\cdk.out\bundling-temp-<hash>'
+```
+
+**The message never names the cause.** It reads like a permissions or antivirus
+problem, and clearing `cdk.out` does not fix it.
+
+What actually happens: the Lambda asset is *bundled*, not copied (see the asset
+block in `infra/lib/biztrack-stack.ts`), so `cdk synth` runs
+`npm ci --omit=dev` and writes ~31 MB of `node_modules` into `infra/cdk.out/`.
+That directory sits inside the repo the Vite dev server is watching, so
+chokidar opens the new files, and CDK's rename of the temp directory to its
+final name fails while those handles are held. Most visible on Windows, where
+renaming a directory with open handles is denied outright.
+
+Stopping the dev server fixes it immediately. Restart it afterwards — nothing
+about the deploy touches your local setup.
+
 ### Building for Production
 
 To create a production build:
