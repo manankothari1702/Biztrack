@@ -504,3 +504,106 @@ dashboard and returns the account to having no monitoring at all — the previou
 quo, not an outage. Nothing else depends on these resources.
 
 ---
+
+## [2026-08-05] — `/health` accepts HEAD, not just GET (`c82f7a2`), deployed
+
+**Status:** **Deployed 2026-08-05 14:21 UTC.** CloudFormation `UPDATE_COMPLETE`,
+deployment time 21.75s, no rollback and no failed resources. Verified in production.
+
+**The symptom.** The uptime monitor configured the same day (FU-EOS-6, Decision B1)
+reported the app DOWN. `HEAD /health` returned **403**; `GET /health` returned 200.
+
+**The cause was routing, not authorization.** API Gateway routes on the exact
+`(resource, httpMethod)` pair and does **not** synthesize HEAD from GET the way nginx,
+Apache and Express do. `/health` declared only `GET`, so a HEAD request matched no
+method and was rejected *before* routing — before the authorizer, before the
+integration, before Lambda ever ran.
+
+`MissingAuthenticationTokenException` is a badly named error that means **"no such
+route"**, not "no credentials". Two controls proved it:
+
+```
+HEAD /health              -> 403  MissingAuthenticationTokenException
+HEAD /nonexistent-route   -> 403  MissingAuthenticationTokenException   <- identical
+GET  /clients (no token)  -> 401  UnauthorizedException                 <- real auth failure
+```
+
+**Ruled out against live infrastructure before changing anything:** no WAF exists in
+either the `REGIONAL` or `CLOUDFRONT` scope; the API has no resource policy
+(`policy: null`); the app's CloudFront distribution has zero additional cache
+behaviours and its default origin is the S3 bucket, so it never sees `/health`; and
+`health.ts` references no `httpMethod`, `resource` or `requestContext` at all. The
+CloudFront headers on the 403 come from the AWS-managed edge in front of the
+`EDGE`-type API, which *forwarded* an origin error rather than raising one.
+
+**Why HEAD was added rather than reconfiguring the monitor.** Both fixes cost the same
+— nothing. HEAD would still invoke the Lambda and still run `DescribeTable`, so there
+is no compute saving; the only difference on the wire is 20 bytes of body. The
+decision was made on standards-compliance grounds: a health endpoint should answer the
+verb that monitors, load balancers and reverse proxies use, and supporting it once
+beats configuring every future tool around the gap. HEAD adds no exposure, because the
+handler never inspects the verb.
+
+**Deployed resources** — 5 changes, no deletions of anything real:
+
+| Change | Resource | Note |
+|---|---|---|
+| create | `ApiGateway::Method` HEAD /health | the fix |
+| create | `Lambda::Permission` | `execute-api:.../prod/HEAD/health` |
+| create | `Lambda::Permission` | `.../test-invoke-stage/HEAD/health` (console Test button) |
+| create + delete | `ApiGateway::Deployment` | deployments are immutable snapshots; CDK mints a new one on any API change and discards the old. **Not** a route deletion |
+| modify | `ApiGateway::Stage` `prod` | `DeploymentId` repointed — this is how the route goes live |
+
+**IAM: exactly two new statements**, both `lambda:InvokeFunction` on the health
+function only, each `ArnLike`-constrained to its own path. One `LambdaIntegration`
+instance serves both methods, and this was checked rather than assumed: CDK still
+emits a **separate permission per verb**. A single shared grant was the real risk of
+reusing the object, and it did not happen.
+
+**Production verification**
+
+| Check | Result |
+|---|---|
+| `HEAD /health` | **200**, **0 bytes** of body, three consecutive runs |
+| `GET /health` | **200**, 20 bytes, `{"status":"healthy"}` |
+| HEAD vs GET headers | **Identical**, except API Gateway adds `x-amzn-Remapped-Content-Length: 20` to HEAD |
+| `Content-Length` on HEAD | `20` with an empty body — correct HTTP semantics, not a bug |
+| `HEAD /clients` | **still 403** — no other route gained HEAD |
+| All 5 CloudWatch alarms | **OK**, and **zero state transitions** since the deploy |
+| `verify.sh` DEPLOYED STACK | **all green**, including `health: healthy` and `alarms reach a human` |
+
+**Header note:** "same security headers as GET" is satisfied, but that set is
+`Content-Type` + `Cache-Control: no-store` only. HSTS, `X-Content-Type-Options` and
+`Referrer-Policy` come from the CloudFront response headers policy on the **frontend**
+distribution, which is not in the API's path — so they have never been present on
+`/health`. Pre-existing, unchanged by this commit, and worth knowing before anyone
+assumes the API carries them.
+
+**Monitor recovery, measured server-side.** API Gateway `4XXError` fell to **0** in the
+first complete post-deploy bucket, and `biztrack-health` invocations now show a clean
+**one-per-five-minutes heartbeat** (19:55, 20:00, 20:05 IST) distinct from the bursty
+manual smoke tests at 19:52-19:53. Before the fix, HEAD requests never reached the
+Lambda at all. **This is inference from server-side telemetry — the monitor's own
+dashboard was not accessible from here, so DOWN -> UP was not read directly.**
+
+**Checks**
+- [x] CloudFormation `UPDATE_COMPLETE`, no rollback, no failed resources
+- [x] Only `/health` changed; no other route, Lambda, table or monitoring resource
+- [x] `HEAD /health` 200 with an empty body; `GET` unchanged
+- [x] `HEAD /clients` still 403
+- [x] Two new IAM statements, both per-verb scoped, no wildcard
+- [x] Authorization test **strengthened**: asserts unauthenticated methods are exactly
+      GET+HEAD **and** that every one of them is on `/health`. The previous version
+      checked only verbs, so an unauthenticated GET on `/clients` would have passed.
+      Mutation-tested both ways
+- [x] All alarms OK, no transitions caused by the deploy
+- [x] 433 tests pass (lambda 264, root 113, infra 56)
+- [ ] `./verify.sh` green — RED on **one** item, the FU-EOS-4 lint baseline (15 errors,
+      unchanged, none in this commit). Every other check passes
+- [ ] Monitor confirmed UP in its own dashboard — owner to eyeball
+
+**Rollback:** `git revert c82f7a2`, then `cd infra && npx cdk deploy`. Removes the HEAD
+method and its two permissions and redeploys the stage. The monitor would return to
+reporting DOWN unless switched to GET first.
+
+---
