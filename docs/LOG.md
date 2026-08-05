@@ -366,3 +366,141 @@ SSM readers, returning the scheduler to ~4,320 errors/day — the previous statu
 not an outage.
 
 ---
+
+## [2026-08-05] — CloudWatch monitoring and alerting (`8a0b5d1`), deployed
+
+**Status:** **Deployed 2026-08-05 13:23 UTC.** CloudFormation `UPDATE_COMPLETE`,
+deployment time 16.59s, no rollback and no failed resources. All five alarms verified
+`OK` against real production metrics. **Two owner actions remain outstanding — see
+"Not done, and cannot be done by code" below. Until the first one is finished, the
+alarms still deliver nothing.**
+
+**What changed and why**
+
+The account had **zero alarms, zero SNS topics and zero dashboards** (FU-EOS-6). That
+is how `biztrack-whatsapp-scheduler` failed 4,320 times a day for at least 31 days
+with nobody knowing, and how the tasks `:prefix` bug 500'd every filtered query until
+a human read the code. Nothing was watching anything.
+
+**Deployed resources** — 7, all creates, no modifies, deletes or replacements. `cdk
+diff` showed **no change to any Lambda code asset**, so no running code was touched:
+
+| Resource | Name |
+|---|---|
+| `AWS::SNS::Topic` | `biztrack-alerts` |
+| `AWS::CloudWatch::Alarm` ×5 | `biztrack-api-5xx`, `-lambda-errors`, `-lambda-throttles`, `-dynamodb-throttles`, `-purge-not-running` |
+| `AWS::CloudWatch::Dashboard` | `biztrack` |
+
+**Zero IAM changes.** A same-account CloudWatch alarm publishing to SNS is authorised
+by the default topic policy, so no topic policy and no role grant were needed. The
+least-privilege work from the Secrets Manager migration is untouched.
+
+**Two corrections to the reviewed design.** Both were caught before deploy, and in
+both cases the reviewed version would have shipped an alarm that never fires:
+
+- **`ThrottledRequests` replaced by `ReadThrottleEvents + WriteThrottleEvents`.** The
+  former is published only *with* an `Operation` dimension, so a `TableName`-only
+  alarm on it never leaves `INSUFFICIENT_DATA`. AWS CDK marks its own
+  `metricThrottledRequests()` as *"@deprecated Do not use this function. It returns an
+  invalid metric."* for exactly this reason.
+- **Purge window 24h replaced by 5 x 6h.** CloudWatch aligns one-day periods to 00:00
+  UTC and the job runs at 03:00, so `treatMissingData: BREACHING` on a 24h window
+  would have emailed a false alarm every single morning.
+
+**Production results**
+
+All five alarms reached `OK`. The state reasons CloudWatch produced are themselves the
+evidence that the two corrections were right:
+
+| Alarm | State | What its own reason proves |
+|---|---|---|
+| `biztrack-api-5xx` | OK | no 5XX in production |
+| `biztrack-lambda-errors` | OK | `1 datapoint [0.0]` - Lambda **does** publish zero-valued datapoints account-wide, so this alarm evaluates on real data, not on absence |
+| `biztrack-lambda-throttles` | OK | same, `[0.0]` |
+| `biztrack-dynamodb-throttles` | OK | `no datapoints ... treated as [NonBreaching]` - the metric never publishes, which is why `treatMissingData` had to be explicit |
+| `biztrack-purge-not-running` | OK | `2 of the last 5 datapoints ... and 3 missing datapoints were treated as [Breaching]` |
+
+That last row is the correction proving itself in production: **three** empty 6h
+windows in healthy operation, against a threshold of **five**. A margin of two, exactly
+as derived from the measured cadence of one run/day. On the reviewed 24h window this
+alarm would already be firing.
+
+**Alarm to SNS delivery verified in both directions.** From
+`describe-alarm-history` on `biztrack-api-5xx`:
+
+```
+18:53:46  StateUpdate  INSUFFICIENT_DATA -> OK
+18:53:46  Action       Successfully executed action arn:aws:sns:...:biztrack-alerts
+18:57:08  StateUpdate  OK -> ALARM            (forced via set-alarm-state)
+18:57:08  Action       Successfully executed action arn:aws:sns:...:biztrack-alerts
+```
+
+Both `addAlarmAction` and `addOkAction` fire and SNS accepts the publish. The forced
+transition was reverted immediately; no real 5XX occurred.
+
+**Dashboard verified from the deployed body**, not from the synth: 8 widgets, all 13
+per-function Lambda error series resolved to real function names (including the
+generated `BiztrackStack-InvoicesHandlerD5D9BEFE-...`), and the Estimated Charges
+widget correctly pinned to `us-east-1` while every other widget resolved to
+`ap-south-1`.
+
+**The new `verify.sh` guard was confirmed working by failing.** Run against live AWS it
+reports: *"biztrack-alerts has no CONFIRMED subscriber - every alarm fires into
+nothing"*, and prints the exact `aws sns subscribe` command. This is the guard doing
+its job, not a defect.
+
+**Not done, and cannot be done by code**
+
+1. 🔴 **The SNS email subscription is `PendingConfirmation`.** `aws sns subscribe` was
+   run for the owner's address at 13:25 UTC; **the confirmation email had still not
+   been delivered 10 minutes later**, checked across the whole mailbox including spam
+   and trash. The mailbox demonstrably receives AWS mail (7 prior threads from
+   `amazonaws.com`). Nothing in the stack is wrong — a subscription is *always* pending
+   until a human clicks — but **until that link is clicked, every alarm above fires
+   into nothing**, which is precisely the failure this work exists to remove. If the
+   mail never arrives, delete and re-create the subscription.
+2. 🟡 **Billing alerts are still off**, so the Estimated Charges widget renders empty.
+   `aws cloudwatch list-metrics --namespace AWS/Billing --region us-east-1` returns
+   `[]`. This is **not scriptable**: the `aws billing` API exposes only billing *views*
+   and has no preference commands, and "Receive Billing Alerts" is a console-only
+   setting under Billing preferences. Owner action, one checkbox.
+3. 🟡 **No external uptime monitor yet** (Decision B1). Every alarm here is internal:
+   they need a request to be made and to fail. A free external monitor on
+   `HealthUrl` is what covers "the whole thing is down on a quiet day".
+
+**Deliberately not built**, so it is not re-litigated: latency alarms (p99 is cold
+starts, 51ms p50 against 1,699ms p99), 4XX alarms (401s from expired tokens are
+normal), `log.error` metric filters, per-function alarms, a scheduler-liveness alarm
+(WhatsApp is intentionally unconfigured), any cost alarm (the $25 budget already
+exists and works), and CloudWatch Synthetics (~$10/mo against ~$3 of budget headroom).
+
+**Thresholds are not permanent.** `BR-BIZ-E06` records the review trigger: past roughly
+50,000 Lambda invocations/day, threshold 1 becomes noise and the replacement is
+per-function alarms plus an error-*rate* alarm. The dashboard's red line at
+concurrency 10 must move when **FU-0** raises the quota, or it becomes a lie.
+
+**Cost:** ~$0.60/month at AWS list price — 4 single-metric alarms at $0.10, one
+2-metric math alarm at $0.20, SNS email inside the 1,000/month free allowance, one
+dashboard inside the 3-free allowance. Confirm on the first bill.
+
+**Checks**
+- [x] CloudFormation `UPDATE_COMPLETE`, no rollback, no failed resources
+- [x] 7 creates, 0 modifies, 0 deletes, 0 replacements, no Lambda asset change
+- [x] All 5 alarms `OK` against real production metrics
+- [x] Alarm and OK actions both `Successfully executed` against the topic
+- [x] Dashboard renders 8 widgets; billing widget pinned to `us-east-1`
+- [x] Zero non-ASCII in the synthesized template (BR-BIZ-E04), asserted by test
+- [x] 432 tests pass (lambda 264, root 113, infra 55, up from 41)
+- [ ] **SNS subscription confirmed** — pending, owner must click the link
+- [ ] **Billing alerts enabled** — pending, console-only owner action
+- [ ] External uptime monitor configured — pending, Decision B1 owner action
+- [ ] `./verify.sh` green — RED on the FU-EOS-4 lint baseline (15 errors, 4 warnings,
+      unchanged, none in any file in this commit) and RED on the new
+      `alarms reach a human` check until the subscription is confirmed
+
+**Rollback:** `git revert 8a0b5d1`, then `cd infra && npx cdk deploy`. It is live, so a
+revert alone changes nothing. Rolling back deletes five alarms, one topic and one
+dashboard and returns the account to having no monitoring at all — the previous status
+quo, not an outage. Nothing else depends on these resources.
+
+---
