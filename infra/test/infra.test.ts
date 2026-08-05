@@ -450,3 +450,141 @@ describe('CloudFront security headers', () => {
             .ContentSecurityPolicy).toBeUndefined();
     });
 });
+
+// ---------------------------------------------------------------------------
+// FU-EOS-6. Before this, the account had zero alarms - which is how the
+// WhatsApp scheduler failed 4,320 times a day for 31 days unseen. These tests
+// exist to stop the specific ways this could silently become decorative again.
+// ---------------------------------------------------------------------------
+describe('Monitoring', () => {
+    const alarms = () => template.findResources('AWS::CloudWatch::Alarm');
+    const byName = (name: string) =>
+        Object.values(alarms()).find(a => a.Properties.AlarmName === name);
+
+    test('there is exactly one alert topic, and it is named for humans', () => {
+        template.resourceCountIs('AWS::SNS::Topic', 1);
+        template.hasResourceProperties('AWS::SNS::Topic', {
+            TopicName:   'biztrack-alerts',
+            DisplayName: 'Biztrack alerts',
+        });
+    });
+
+    // The whole of Decision A1. The repo is public, so no address may appear
+    // here; and a `-c alertEmail=` context value would be DELETED by the next
+    // deploy that forgot the flag, silently restoring the blindness. The
+    // subscription is made out of band and guarded by verify.sh instead.
+    test('NO subscription is declared in the stack', () => {
+        template.resourceCountIs('AWS::SNS::Subscription', 0);
+    });
+
+    test('all five alarms exist, and no others crept in', () => {
+        expect(Object.values(alarms()).map(a => a.Properties.AlarmName).sort()).toEqual([
+            'biztrack-api-5xx',
+            'biztrack-dynamodb-throttles',
+            'biztrack-lambda-errors',
+            'biztrack-lambda-throttles',
+            'biztrack-purge-not-running',
+        ]);
+    });
+
+    // The failure this section exists to prevent, in test form: an alarm that
+    // fires into nothing is worse than no alarm, because the console looks fine.
+    test('every alarm notifies the topic on BOTH alarm and recovery', () => {
+        for (const a of Object.values(alarms())) {
+            expect(a.Properties.AlarmActions).toHaveLength(1);
+            expect(a.Properties.OKActions).toHaveLength(1);
+            expect(a.Properties.AlarmActions[0]).toEqual(a.Properties.OKActions[0]);
+        }
+    });
+
+    test('every alarm states what to do about it', () => {
+        for (const a of Object.values(alarms())) {
+            expect(a.Properties.AlarmDescription.length).toBeGreaterThan(60);
+        }
+    });
+
+    // BR-BIZ-E04. Non-ASCII in an AWS description has broken a deploy here before.
+    test('no alarm name or description carries a non-ASCII character', () => {
+        for (const a of Object.values(alarms())) {
+            expect(a.Properties.AlarmName).toMatch(/^[\x20-\x7E]+$/);
+            expect(a.Properties.AlarmDescription).toMatch(/^[\x20-\x7E]+$/);
+        }
+    });
+
+    test('API 5XX alarm is scoped by ApiName ONLY, never by Stage', () => {
+        const a = byName('biztrack-api-5xx')!;
+        expect(a.Properties.Namespace).toBe('AWS/ApiGateway');
+        expect(a.Properties.MetricName).toBe('5XXError');
+        expect(a.Properties.Dimensions).toHaveLength(1);
+        expect(a.Properties.Dimensions[0].Name).toBe('ApiName');
+    });
+
+    // Undimensioned on purpose: this is the only alarm that sees EventBridge
+    // targets, the Cognito trigger and direct invokes. Adding a FunctionName
+    // dimension here would re-blind the app to the WhatsApp class of failure.
+    test.each([
+        ['biztrack-lambda-errors',    'Errors'],
+        ['biztrack-lambda-throttles', 'Throttles'],
+    ])('%s watches ALL Lambdas, with no dimensions', (name, metric) => {
+        const a = byName(name)!;
+        expect(a.Properties.Namespace).toBe('AWS/Lambda');
+        expect(a.Properties.MetricName).toBe(metric);
+        expect(a.Properties.Dimensions).toBeUndefined();
+        expect(a.Properties.Statistic).toBe('Sum');
+        expect(a.Properties.Period).toBe(300);
+        expect(a.Properties.Threshold).toBe(1);
+    });
+
+    // CDK marks table.metricThrottledRequests() "@deprecated ... returns an
+    // invalid metric": ThrottledRequests only publishes WITH an Operation
+    // dimension, so a TableName-only alarm on it never leaves INSUFFICIENT_DATA.
+    test('DynamoDB throttle alarm uses throttle EVENTS, not ThrottledRequests', () => {
+        const a = byName('biztrack-dynamodb-throttles')!;
+        const used = JSON.stringify(a.Properties.Metrics);
+        expect(used).toContain('ReadThrottleEvents');
+        expect(used).toContain('WriteThrottleEvents');
+        expect(used).not.toContain('ThrottledRequests');
+    });
+
+    test('the four "something broke" alarms treat no data as healthy', () => {
+        for (const name of [
+            'biztrack-api-5xx', 'biztrack-lambda-errors',
+            'biztrack-lambda-throttles', 'biztrack-dynamodb-throttles',
+        ]) {
+            expect(byName(name)!.Properties.TreatMissingData).toBe('notBreaching');
+        }
+    });
+
+    // The one alarm that inverts it: here absence IS the failure. 6h windows,
+    // five of them, because a 24h period aligns to 00:00 UTC and the job runs at
+    // 03:00 - which would alarm every morning. One run/day leaves at most THREE
+    // consecutive empty 6h windows, so five cannot false-positive.
+    test('purge alarm fires on ABSENCE, over a window a daily job cannot trip', () => {
+        const a = byName('biztrack-purge-not-running')!;
+        expect(a.Properties.MetricName).toBe('Invocations');
+        expect(a.Properties.ComparisonOperator).toBe('LessThanThreshold');
+        expect(a.Properties.Threshold).toBe(1);
+        expect(a.Properties.Period).toBe(21600);
+        expect(a.Properties.EvaluationPeriods).toBe(5);
+        expect(a.Properties.DatapointsToAlarm).toBe(5);
+        expect(a.Properties.TreatMissingData).toBe('breaching');
+    });
+
+    test('one dashboard exists, named biztrack', () => {
+        template.resourceCountIs('AWS::CloudWatch::Dashboard', 1);
+        template.hasResourceProperties('AWS::CloudWatch::Dashboard', {
+            DashboardName: 'biztrack',
+        });
+    });
+
+    // AWS/Billing publishes ONLY in us-east-1. A widget left in ap-south-1
+    // renders permanently empty, which reads as zero spend rather than no data.
+    test('the billing widget is pinned to us-east-1', () => {
+        const body = JSON.stringify(
+            Object.values(template.findResources('AWS::CloudWatch::Dashboard'))[0]
+                .Properties.DashboardBody,
+        );
+        expect(body).toContain('EstimatedCharges');
+        expect(body).toContain('us-east-1');
+    });
+});

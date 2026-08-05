@@ -213,6 +213,34 @@ else
 fi
 skip "backup + restore round trip" "never tested - an unrestored backup is a file, not a safety net (FU-EOS-2)"
 
+# --- alerting ---------------------------------------------------------------
+# The alarms are worthless without a confirmed destination, and an UNCONFIRMED
+# SNS email subscription is the worst case of all: it accepts every alarm and
+# throws it away, so the console looks configured while nothing is delivered.
+# No subscription ships in the CDK stack on purpose (public repo; a `-c` context
+# value would be deleted by the next deploy that forgot the flag - FU-EOS-6),
+# so this check is what keeps that decision honest.
+if have aws; then
+  TOPIC_ARN=$(aws sns list-topics \
+                --query "Topics[?ends_with(TopicArn, ':biztrack-alerts')].TopicArn | [0]" \
+                --output text 2>/dev/null)
+  if [ -n "$TOPIC_ARN" ] && [ "$TOPIC_ARN" != "None" ]; then
+    CONFIRMED=$(aws sns list-subscriptions-by-topic --topic-arn "$TOPIC_ARN" \
+                  --query "length(Subscriptions[?SubscriptionArn!='PendingConfirmation' && SubscriptionArn!='Deleted'])" \
+                  --output text 2>/dev/null)
+    if [ "${CONFIRMED:-0}" -gt 0 ] 2>/dev/null; then
+      pass "alarms reach a human"
+    else
+      fail "alarms reach a human" \
+           "biztrack-alerts has no CONFIRMED subscriber - every alarm fires into nothing. Run: aws sns subscribe --topic-arn $TOPIC_ARN --protocol email --notification-endpoint <address>, then click the confirmation link"
+    fi
+  else
+    fail "alarms reach a human" "SNS topic biztrack-alerts does not exist - deploy infra/"
+  fi
+else
+  skip "alarms reach a human" "aws cli not available"
+fi
+
 # ============================================================================
 # APP CHECKS - anything specific to Biztrack goes below.
 # ============================================================================

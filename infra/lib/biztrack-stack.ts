@@ -10,6 +10,9 @@ import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import * as cwActions from 'aws-cdk-lib/aws-cloudwatch-actions';
+import * as sns from 'aws-cdk-lib/aws-sns';
 import { Construct } from 'constructs';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -755,6 +758,328 @@ export class BiztrackStack extends cdk.Stack {
         //  derive the CloudFront domain — see the "S3 + CLOUDFRONT" block earlier.)
 
         // ─────────────────────────────────────────────────────────────────────
+        // 7. MONITORING — five alarms, one channel, one dashboard (FU-EOS-6)
+        //
+        // Before this section the account had zero alarms, zero SNS topics and
+        // zero dashboards. That is how `biztrack-whatsapp-scheduler` failed
+        // 4,320 times a day for at least 31 days with nobody knowing: nothing
+        // was watching. Everything below exists to make that silence impossible.
+        //
+        // THE TRAFFIC SHAPE DICTATES THE DESIGN. Measured over the 14 days to
+        // 2026-08-05: 0-444 API requests/day, and ELEVEN of those fourteen days
+        // saw zero traffic at all. p50 51ms, p99 1,699ms (cold starts). So:
+        //   - rate alarms (errors ÷ invocations) divide by ~0 and flap. Not used.
+        //   - latency alarms fire on cold starts, not on problems.  Not used.
+        //   - EVERY alarm needs an explicit treatMissingData, or the eleven
+        //     quiet days alarm on their own.
+        // ─────────────────────────────────────────────────────────────────────
+
+        // The one notification channel. NO subscription is declared here, and
+        // that is deliberate, not an omission:
+        //   - this repository is PUBLIC, so an address in the stack is published;
+        //   - a `-c alertEmail=...` context value would be silently DELETED by
+        //     the next deploy that forgot the flag, restoring exactly the
+        //     blindness this section removes, with no error to show for it.
+        // The owner subscribes once, out of band:
+        //
+        //   aws sns subscribe --topic-arn <AlertsTopicArn> \
+        //     --protocol email --notification-endpoint <address>
+        //
+        // then clicks the confirmation link. `verify.sh` fails while that
+        // subscription is missing OR unconfirmed, because an unconfirmed
+        // subscription accepts alarms and throws them away.
+        const alertsTopic = new sns.Topic(this, 'BiztrackAlerts', {
+            topicName:   'biztrack-alerts',
+            displayName: 'Biztrack alerts',
+        });
+
+        const notify = new cwActions.SnsAction(alertsTopic);
+
+        // Every alarm notifies on the way IN and on the way OUT. Alarms here are
+        // rare by construction, so a "resolved" mail is signal rather than noise.
+        // This helper exists for one reason only: it makes it impossible to add
+        // an alarm that has nowhere to send anything — the precise failure this
+        // whole section is here to fix.
+        const alarm = (id: string, props: cloudwatch.AlarmProps): cloudwatch.Alarm => {
+            const a = new cloudwatch.Alarm(this, id, props);
+            a.addAlarmAction(notify);
+            a.addOkAction(notify);
+            return a;
+        };
+
+        const FIVE_MIN = cdk.Duration.minutes(5);
+
+        // ── 1. API returned a 5XX ───────────────────────────────────────────
+        // Dimension is ApiName ONLY, never ApiName+Stage: a stage rename would
+        // silently blind a Stage-scoped alarm and nothing would say so.
+        // Threshold 1 — at 0-444 requests/day, one server error IS the incident.
+        alarm('ApiServerErrorAlarm', {
+            alarmName: 'biztrack-api-5xx',
+            alarmDescription:
+                'API Gateway returned a 5XX, so a signed-in user just saw a server error. '
+                + 'Open the biztrack dashboard and read the per-function Lambda errors graph '
+                + 'to see which handler failed.',
+            metric: api.metricServerError({ statistic: 'Sum', period: FIVE_MIN }),
+            threshold: 1,
+            comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            evaluationPeriods: 1,
+            // 11 of 14 days have no traffic at all, so no data must mean healthy.
+            treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+        });
+
+        // ── 2. Any Lambda errored, ACCOUNT-WIDE ─────────────────────────────
+        // Deliberately undimensioned, for two reasons.
+        //
+        // FIRST, it is the only alarm that can see async work, and alarm 1
+        // cannot substitute for it. Measured 2026-08-05: `biztrack-tasks`
+        // recorded 5 Lambda errors at 08:30 UTC while ApiGateway 5XXError was 0
+        // for three days straight. EventBridge targets, the Cognito post-
+        // confirmation trigger and direct invokes never touch API Gateway at
+        // all — which is exactly why the WhatsApp scheduler could fail 130,000
+        // times unseen.
+        //
+        // SECOND, one alarm instead of thirteen, for $0.10/month instead of
+        // $1.30. Every Lambda in this account belongs to Biztrack. Attribution
+        // comes from the per-function graph on the dashboard, which is where you
+        // look anyway once the mail arrives.
+        //
+        // REVIEW TRIGGER: threshold 1 is right at ~4,300 invocations/day. Past
+        // roughly 50,000/day it becomes noise, and the replacement is
+        // per-function alarms plus an error-RATE alarm. Recorded in docs/RULES.md
+        // so the number has an owner instead of quietly rotting.
+        alarm('LambdaErrorsAlarm', {
+            alarmName: 'biztrack-lambda-errors',
+            alarmDescription:
+                'A Lambda function raised an error. This covers scheduled and async work that '
+                + 'never reaches API Gateway, including the WhatsApp scheduler, the daily purge '
+                + 'and the Cognito post confirmation trigger.',
+            metric: new cloudwatch.Metric({
+                namespace:  'AWS/Lambda',
+                metricName: 'Errors',
+                statistic:  'Sum',
+                period:     FIVE_MIN,
+            }),
+            threshold: 1,
+            comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            evaluationPeriods: 1,
+            treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+        });
+
+        // ── 3. A Lambda was throttled, ACCOUNT-WIDE ─────────────────────────
+        // The live availability risk in this app. Account concurrency is still
+        // 10 (the AWS new-account floor, never raised — FU-0), and all thirteen
+        // functions share it. One bulk import next to the per-minute scheduler
+        // can starve the whole app, and until now nothing would have said so.
+        // A throttle is never normal here: measured throttles over 14 days = 0.
+        alarm('LambdaThrottlesAlarm', {
+            alarmName: 'biztrack-lambda-throttles',
+            alarmDescription:
+                'A Lambda invocation was throttled. The account concurrency limit is 10 '
+                + '(FU-0, never raised), shared by all 13 functions. Users are seeing failures '
+                + 'or the scheduler is being dropped.',
+            metric: new cloudwatch.Metric({
+                namespace:  'AWS/Lambda',
+                metricName: 'Throttles',
+                statistic:  'Sum',
+                period:     FIVE_MIN,
+            }),
+            threshold: 1,
+            comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            evaluationPeriods: 1,
+            treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+        });
+
+        // ── 4. DynamoDB throttled a request ─────────────────────────────────
+        // NOT `ThrottledRequests`, which the reviewed design named. That metric
+        // is only published WITH an Operation dimension, so a TableName-only
+        // alarm on it would sit at INSUFFICIENT_DATA forever and never fire.
+        // AWS CDK marks its own `table.metricThrottledRequests()` as
+        // "@deprecated Do not use this function. It returns an invalid metric."
+        // for exactly this reason.
+        //
+        // ReadThrottleEvents and WriteThrottleEvents ARE published at TableName
+        // granularity, and their sum is the same signal, correctly measured.
+        // Two metrics in the expression, so this alarm costs ~$0.20 not $0.10.
+        const ddbThrottleEvents = new cloudwatch.MathExpression({
+            expression: 'reads + writes',
+            usingMetrics: {
+                reads:  table.metric('ReadThrottleEvents',  { statistic: 'Sum', period: FIVE_MIN }),
+                writes: table.metric('WriteThrottleEvents', { statistic: 'Sum', period: FIVE_MIN }),
+            },
+            period: FIVE_MIN,
+            label:  'Throttled reads and writes',
+        });
+
+        alarm('DynamoThrottleAlarm', {
+            alarmName: 'biztrack-dynamodb-throttles',
+            alarmDescription:
+                'DynamoDB throttled a read or a write on the biztrack table. On an on-demand '
+                + 'table this means a hot partition or a burst above the current scaling '
+                + 'ceiling. Requests are failing.',
+            metric: ddbThrottleEvents,
+            threshold: 1,
+            comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            evaluationPeriods: 1,
+            treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+        });
+
+        // ── 5. The daily purge stopped running ──────────────────────────────
+        // The only ABSENCE alarm here, and the only failure in this app that is
+        // invisible to all four alarms above. `docs/PROJECT.md` §10 promises
+        // PENDING_DELETION accounts are purged. If the EventBridge rule is
+        // disabled or deleted, nothing errors, nothing 5XXs, and that promise
+        // quietly stops being true.
+        //
+        // NOT "Sum < 1 over 24h" as the reviewed design worded it. CloudWatch
+        // aligns one-day periods to 00:00 UTC, and Lambda publishes NO datapoint
+        // at all when a function is not invoked. The purge runs at 03:00 UTC, so
+        // every day between 00:00 and 03:00 the current period is missing data,
+        // which under treatMissingData BREACHING is a false alarm every single
+        // morning.
+        //
+        // Instead: five consecutive 6-hour windows with no invocation. Measured
+        // cadence is exactly one run per day (7 of 7 days), which leaves at most
+        // THREE consecutive empty windows in healthy operation — so this cannot
+        // false-positive, and it fires about 33h after a genuine stoppage. A
+        // daily housekeeping job does not need to be caught faster than that.
+        alarm('PurgeNotRunningAlarm', {
+            alarmName: 'biztrack-purge-not-running',
+            alarmDescription:
+                'biztrack-purge-accounts has not run for over 30 hours. It is scheduled daily at '
+                + '03:00 UTC. Accounts past their 7 day recovery window are no longer being '
+                + 'purged, so the retention promise in docs/PROJECT.md section 10 is not being '
+                + 'kept. Check the EventBridge rule biztrack-purge-accounts-daily is enabled.',
+            metric: purgeAccountsLambda.metricInvocations({
+                statistic: 'Sum',
+                period:    cdk.Duration.hours(6),
+            }),
+            threshold: 1,
+            comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+            evaluationPeriods: 5,
+            datapointsToAlarm: 5,
+            // The ONE alarm that inverts this. Here absence IS the failure: a
+            // window with no datapoint is a window where the job did not run.
+            treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+        });
+
+        // ── The dashboard ───────────────────────────────────────────────────
+        // One URL that answers "is it fine?" for a chartered accountant rather
+        // than an engineer. It also carries the attribution that alarms 2 and 3
+        // deliberately gave up by being account-wide.
+        const allFunctions: lambda.Function[] = [
+            postConfirmationLambda, healthLambda, clientsLambda, tasksLambda,
+            productsLambda, batchesLambda, stockMovementsLambda, invoicesLambda,
+            dashboardLambda, userLambda, whatsappSchedulerLambda, whatsappTestLambda,
+            purgeAccountsLambda,
+        ];
+
+        const dashboard = new cloudwatch.Dashboard(this, 'BiztrackDashboard', {
+            dashboardName:   'biztrack',
+            defaultInterval: cdk.Duration.days(7),
+        });
+
+        dashboard.addWidgets(
+            new cloudwatch.TextWidget({
+                markdown:
+                    '# Biztrack\n'
+                    + 'Alarms mail `biztrack-alerts`. Empty graphs are normal: 11 of the last 14 '
+                    + 'days had no traffic at all.\n\n'
+                    + '**Estimated charges covers the WHOLE AWS account**, not just Biztrack, and '
+                    + 'stays blank until Billing preferences has "Receive Billing Alerts" turned on.',
+                width: 24, height: 3,
+            }),
+        );
+
+        dashboard.addWidgets(
+            new cloudwatch.GraphWidget({
+                title: 'API requests and 5XX',
+                left:  [api.metricCount({ statistic: 'Sum', period: FIVE_MIN })],
+                right: [api.metricServerError({ statistic: 'Sum', period: FIVE_MIN })],
+                width: 12, height: 6,
+            }),
+            new cloudwatch.GraphWidget({
+                title: 'API latency p50 and p99 (ms)',
+                left: [
+                    api.metricLatency({ statistic: 'p50', period: FIVE_MIN, label: 'p50' }),
+                    api.metricLatency({ statistic: 'p99', period: FIVE_MIN, label: 'p99' }),
+                ],
+                width: 12, height: 6,
+            }),
+        );
+
+        dashboard.addWidgets(
+            new cloudwatch.GraphWidget({
+                title: 'Lambda errors by function - WHICH handler is failing',
+                left:  allFunctions.map((fn) => fn.metricErrors({
+                    statistic: 'Sum',
+                    period:    FIVE_MIN,
+                    label:     fn.functionName,
+                })),
+                width: 12, height: 6,
+            }),
+            new cloudwatch.GraphWidget({
+                title: 'Lambda concurrency and throttles',
+                left: [new cloudwatch.Metric({
+                    namespace:  'AWS/Lambda',
+                    metricName: 'ConcurrentExecutions',
+                    statistic:  'Maximum',
+                    period:     FIVE_MIN,
+                    label:      'Concurrent executions (account)',
+                })],
+                right: [new cloudwatch.Metric({
+                    namespace:  'AWS/Lambda',
+                    metricName: 'Throttles',
+                    statistic:  'Sum',
+                    period:     FIVE_MIN,
+                    label:      'Throttles (account)',
+                })],
+                // The ceiling everything in this app shares. MOVE THIS when FU-0
+                // raises the quota, or the line becomes a lie.
+                leftAnnotations: [{
+                    value: 10,
+                    label: 'account concurrency limit 10 (FU-0)',
+                    color: cloudwatch.Color.RED,
+                }],
+                width: 12, height: 6,
+            }),
+        );
+
+        dashboard.addWidgets(
+            new cloudwatch.GraphWidget({
+                title: 'DynamoDB consumed capacity',
+                left: [
+                    table.metricConsumedReadCapacityUnits({ statistic: 'Sum', period: FIVE_MIN }),
+                    table.metricConsumedWriteCapacityUnits({ statistic: 'Sum', period: FIVE_MIN }),
+                ],
+                width: 8, height: 6,
+            }),
+            new cloudwatch.GraphWidget({
+                title: 'DynamoDB throttled reads and writes',
+                left:  [ddbThrottleEvents],
+                width: 8, height: 6,
+            }),
+            // Dashboard-only, by decision: the $25 AWS Budget already alerts on
+            // cost, and a second cost alert is a duplicate, not a safety net.
+            // AWS/Billing is published ONLY in us-east-1, so both the metric and
+            // the widget are pinned there — a widget left in ap-south-1 would
+            // render permanently empty and look like zero spend.
+            new cloudwatch.GraphWidget({
+                title:  'Estimated AWS charges, whole account (USD)',
+                region: 'us-east-1',
+                left: [new cloudwatch.Metric({
+                    namespace:     'AWS/Billing',
+                    metricName:    'EstimatedCharges',
+                    dimensionsMap: { Currency: 'USD' },
+                    statistic:     'Maximum',
+                    period:        cdk.Duration.hours(6),
+                    region:        'us-east-1',
+                    label:         'Estimated charges',
+                })],
+                width: 8, height: 6,
+            }),
+        );
+
+        // ─────────────────────────────────────────────────────────────────────
         // 8. STACK OUTPUTS — values the frontend .env needs
         // ─────────────────────────────────────────────────────────────────────
 
@@ -796,6 +1121,21 @@ export class BiztrackStack extends cdk.Stack {
         new cdk.CfnOutput(this, 'DynamoTableName', {
             value: table.tableName,
             description: 'DynamoDB table name',
+        });
+
+        new cdk.CfnOutput(this, 'AlertsTopicArn', {
+            value: alertsTopic.topicArn,
+            // No subscription ships in the stack (public repo, and a context flag
+            // would be deleted by the next deploy that forgot it). Subscribe once:
+            //   aws sns subscribe --topic-arn <this> --protocol email \
+            //     --notification-endpoint <address>
+            description: 'Alarm topic - subscribe an email to it once, then confirm the link',
+        });
+
+        new cdk.CfnOutput(this, 'DashboardUrl', {
+            value: `https://${this.region}.console.aws.amazon.com/cloudwatch/home`
+                 + `?region=${this.region}#dashboards:name=${dashboard.dashboardName}`,
+            description: 'CloudWatch dashboard for Biztrack',
         });
     }
 }

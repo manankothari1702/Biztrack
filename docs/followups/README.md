@@ -214,9 +214,22 @@ Two stacks cannot coexist in one account/region while these are fixed strings:
 | `functionName` ×11 | `biztrack-post-confirmation`, `-clients`, `-tasks`, `-products`, `-batches`, `-stock-movements`, `-dashboard`, `-user`, `-whatsapp-scheduler`, `-whatsapp-test`, `-purge-accounts` |
 | `ruleName` ×2 | `biztrack-whatsapp-every-minute`, `biztrack-purge-accounts-daily` |
 | `bucketName` | `biztrack-frontend-${account}` (account-scoped, so identical across stacks) |
+| `topicName` | `biztrack-alerts` *(added by FU-EOS-6)* |
+| `alarmName` ×5 | `biztrack-api-5xx`, `-lambda-errors`, `-lambda-throttles`, `-dynamodb-throttles`, `-purge-not-running` *(added by FU-EOS-6)* |
+| `dashboardName` | `biztrack` *(added by FU-EOS-6)* |
 
 Also needed: an env-suffixed stack id in `infra/bin/infra.ts` (currently the literal
 `'BiztrackStack'`).
+
+> **Why FU-EOS-6 added seven more names rather than letting CDK generate them.** The
+> invoices handler set the precedent that new resources carry no physical name. The
+> monitoring resources deliberately break it, because their names are the product:
+> the alarm name is the subject line the owner reads at 3am, and
+> `BiztrackStack-LambdaErrorsAlarm8ED74A7D` tells a chartered accountant nothing. The
+> topic name is what the one-off `aws sns subscribe` command and the `verify.sh`
+> lookup both key on. These are cheap to parameterize when FU-B6 lands — unlike the
+> table and the user pool, an alarm is stateless, so a rename is a delete-and-create
+> with nothing to lose.
 
 **⚠️ Hazard — the reason this needs care, not just effort.** `env=prod` must resolve to the
 **exact** current strings. Any drift — a suffix, a case change, a stray hyphen — is a physical

@@ -128,6 +128,30 @@ principles. 🟡 Important.
 
 Use hyphens. 🟢 Convention.
 
+### BR-BIZ-E05 — An alarm with no confirmed destination is not an alarm
+
+Every CloudWatch alarm in `infra/` notifies `biztrack-alerts` on alarm **and** on OK.
+No SNS subscription is declared in the stack: this repository is public, and a
+`-c alertEmail=` context value would be deleted by the next deploy that forgot the
+flag — silently restoring the blindness that let the WhatsApp scheduler fail 4,320
+times a day for 31 days. The subscription is made once, out of band, and `verify.sh`
+fails while it is missing **or unconfirmed**. An unconfirmed subscription accepts
+every alarm and discards it, which looks configured and is worse than nothing.
+🔴 Critical.
+
+### BR-BIZ-E06 — Alarm thresholds are reviewed against traffic, not left to rot
+
+`biztrack-lambda-errors` and `biztrack-lambda-throttles` are account-wide with a
+threshold of **1**, which is correct at today's ~4,300 invocations/day: one error is
+one incident. **Review trigger — when Lambda invocations exceed roughly 50,000/day**,
+threshold 1 becomes noise, and the replacement is per-function alarms plus an
+error-*rate* alarm. Check this whenever user count changes by an order of magnitude.
+
+Two constants in the same section are also load-bearing and will silently go stale:
+the `10` concurrency annotation on the dashboard (move it when **FU-0** raises the
+quota, or the red line is a lie) and the five-window purge alarm (re-derive it if the
+purge stops running exactly once a day). 🟡 Important.
+
 ---
 
 > **Never invent a tax rate, threshold, section number or due date.** If you cannot
