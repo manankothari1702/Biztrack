@@ -755,22 +755,22 @@ export class BiztrackStack extends cdk.Stack {
 
         new cdk.CfnOutput(this, 'UserPoolId', {
             value: userPool.userPoolId,
-            description: 'Cognito User Pool ID → VITE_COGNITO_USER_POOL_ID',
+            description: 'Cognito User Pool ID -> VITE_COGNITO_USER_POOL_ID',
         });
 
         new cdk.CfnOutput(this, 'UserPoolClientId', {
             value: userPoolClient.userPoolClientId,
-            description: 'Cognito App Client ID → VITE_COGNITO_CLIENT_ID',
+            description: 'Cognito App Client ID -> VITE_COGNITO_CLIENT_ID',
         });
 
         new cdk.CfnOutput(this, 'CognitoDomain', {
             value: `https://${userPoolDomain.domainName}.auth.${this.region}.amazoncognito.com`,
-            description: 'Cognito Hosted UI domain → VITE_COGNITO_DOMAIN',
+            description: 'Cognito Hosted UI domain -> VITE_COGNITO_DOMAIN',
         });
 
         new cdk.CfnOutput(this, 'ApiUrl', {
             value: api.url,
-            description: 'API Gateway URL → VITE_API_URL',
+            description: 'API Gateway URL -> VITE_API_URL',
         });
 
         new cdk.CfnOutput(this, 'CloudFrontUrl', {
