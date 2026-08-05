@@ -183,11 +183,16 @@ export class BiztrackStack extends cdk.Stack {
         // DynamoDB access
         table.grantReadWriteData(lambdaRole);
 
-        // SSM for WhatsApp secrets
+        // Secrets Manager. Read-only access to this app's secrets, for the WhatsApp
+        // scheduler and test endpoint. Read is the only verb the runtime needs:
+        // secrets are created and rotated out of band, never by application code. The
+        // trailing wildcard is required because AWS appends a 6 character suffix to
+        // every secret ARN, so `secret:biztrack/whatsapp/token` alone would never match.
+        // This replaced an ssm:GetParameter grant once no Lambda read Parameter Store.
         lambdaRole.addToPolicy(new iam.PolicyStatement({
-            actions: ['ssm:GetParameter', 'ssm:GetParameters'],
+            actions: ['secretsmanager:GetSecretValue'],
             resources: [
-                `arn:aws:ssm:${this.region}:${this.account}:parameter/biztrack/*`,
+                `arn:aws:secretsmanager:${this.region}:${this.account}:secret:biztrack/*`,
             ],
         }));
 

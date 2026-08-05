@@ -1,20 +1,39 @@
 import { QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
-import { GetParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
+import {
+    GetSecretValueCommand,
+    ResourceNotFoundException,
+    SecretsManagerClient,
+} from '@aws-sdk/client-secrets-manager';
 import axios from 'axios';
 import { db, TABLE } from './lib/db';
 
-const ssm = new SSMClient({ region: process.env.AWS_REGION ?? 'ap-south-1' });
+const secrets = new SecretsManagerClient({ region: process.env.AWS_REGION ?? 'ap-south-1' });
 
-const getSecret = async (name: string): Promise<string> => {
-    const res = await ssm.send(new GetParameterCommand({ Name: name, WithDecryption: true }));
-    return res.Parameter?.Value ?? '';
+// An absent secret means WhatsApp is deliberately not configured yet — the Meta
+// Business API credentials have not been purchased. That is the ONLY failure this
+// swallows. AccessDenied, throttling, network and every other SDK error rethrow and
+// surface as a Lambda error, because those are real faults, not "feature is off".
+const getSecret = async (id: string): Promise<string> => {
+    try {
+        const res = await secrets.send(new GetSecretValueCommand({ SecretId: id }));
+        return res.SecretString ?? '';
+    } catch (err) {
+        if (err instanceof ResourceNotFoundException) return '';
+        throw err;
+    }
 };
 
 export const handler = async (): Promise<void> => {
     const [token, phoneNumberId] = await Promise.all([
-        getSecret('/biztrack/whatsapp/token'),
-        getSecret('/biztrack/whatsapp/phone-id'),
+        getSecret('biztrack/whatsapp/token'),
+        getSecret('biztrack/whatsapp/phone-id'),
     ]);
+
+    // Not configured — stop before the GSI5 query, the Meta call and any profile
+    // write. Silent on purpose: this runs every minute, so a log line here would be
+    // 1,440/day into a log group that has no retention policy. `Invocations` already
+    // proves the function is alive and `Errors` proves it is healthy.
+    if (!token || !phoneNumberId) return;
 
     const now      = new Date();
     const hhmm     = now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false });
