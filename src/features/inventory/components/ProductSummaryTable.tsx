@@ -8,7 +8,17 @@ import { formatIsoDate, inventoryTotals, productValue, vpInStock } from '../../.
 import type { IsoDate, Product } from '../../../shared/types';
 
 interface ProductSummaryTableProps {
+    /** The rows to render — one page of the filtered catalogue. */
     products: Product[];
+    /**
+     * The WHOLE filtered set the TOTAL row sums.
+     *
+     * Separate from `products` because that is only the visible page. Summing
+     * the page would label a page subtotal "Total" and disagree with the
+     * valuation cards above, which count the entire catalogue — two totals on
+     * one screen, differing, with nothing saying why.
+     */
+    totalsProducts: Product[];
     loading?: boolean;
     today?: IsoDate;
     onEdit: (product: Product) => void;
@@ -34,15 +44,22 @@ const SkeletonRows: React.FC<{ cols: number }> = ({ cols }) => (
  * product's CACHED aggregates; the batch table below is the per-lot truth.
  */
 const ProductSummaryTable: React.FC<ProductSummaryTableProps> = ({
-    products, loading = false, today, onEdit, onDelete,
+    products, totalsProducts, loading = false, today, onEdit, onDelete,
 }) => {
-    const totals = inventoryTotals(products);
+    const totals = inventoryTotals(totalsProducts);
+
+    // When the filtered set spills past one page the TOTAL row covers more than
+    // the rows above it, so both the header and the row itself have to say so —
+    // otherwise adding up the visible Qty column silently disagrees with Total.
+    const paginated = totalsProducts.length > products.length;
 
     return (
         <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
             <div className="px-5 py-4 border-b border-slate-100 bg-slate-50/40 flex items-center justify-between gap-3">
                 <h3 className="text-sm font-bold text-slate-800 font-mono tracking-tight uppercase">Summary by product</h3>
-                <span className="text-xs text-slate-400 font-mono">{products.length} shown</span>
+                <span className="text-xs text-slate-400 font-mono">
+                    {paginated ? `${products.length} of ${totalsProducts.length} shown` : `${products.length} shown`}
+                </span>
             </div>
 
             {/* ── Desktop table ─────────────────────────────────────────── */}
@@ -108,7 +125,14 @@ const ProductSummaryTable: React.FC<ProductSummaryTableProps> = ({
 
                         {!loading && products.length > 0 && (
                             <tr className="bg-slate-50/70 font-bold text-slate-800">
-                                <td className="p-4 font-mono text-xs uppercase tracking-wider text-slate-500">Total</td>
+                                <td className="p-4 font-mono text-xs uppercase tracking-wider text-slate-500">
+                                    Total
+                                    {paginated && (
+                                        <span className="block mt-0.5 font-sans text-[10px] font-medium normal-case tracking-normal text-slate-400">
+                                            all {totalsProducts.length} filtered products
+                                        </span>
+                                    )}
+                                </td>
                                 <td className="p-4 text-right font-mono">{totals.totalUnits}</td>
                                 <td className="p-4 hidden lg:table-cell" />
                                 <td className="p-4 text-right font-mono">{formatInr(totals.stockValue)}</td>
@@ -178,9 +202,16 @@ const ProductSummaryTable: React.FC<ProductSummaryTableProps> = ({
                 ))}
 
                 {!loading && products.length > 0 && (
-                    <div className="p-4 bg-slate-50/70 flex justify-between text-sm font-bold text-slate-800">
-                        <span className="font-mono text-xs uppercase tracking-wider text-slate-500">Total</span>
-                        <span className="font-mono">{totals.totalUnits} units · {formatInr(totals.stockValue)} · {formatVp(totals.vpInStock)} VP</span>
+                    <div className="p-4 bg-slate-50/70 flex justify-between gap-3 text-sm font-bold text-slate-800">
+                        <span className="font-mono text-xs uppercase tracking-wider text-slate-500 shrink-0">
+                            Total
+                            {paginated && (
+                                <span className="block mt-0.5 font-sans text-[10px] font-medium normal-case tracking-normal text-slate-400">
+                                    all {totalsProducts.length}
+                                </span>
+                            )}
+                        </span>
+                        <span className="font-mono text-right">{totals.totalUnits} units · {formatInr(totals.stockValue)} · {formatVp(totals.vpInStock)} VP</span>
                     </div>
                 )}
             </div>

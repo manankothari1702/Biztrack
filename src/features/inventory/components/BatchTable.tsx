@@ -1,9 +1,9 @@
 import React from 'react';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
-import { faPen, faTrashCan } from '@fortawesome/free-solid-svg-icons';
+import { faCircleMinus, faPen } from '@fortawesome/free-solid-svg-icons';
 import ExpiryBadge from './ExpiryBadge';
 import { formatInr, formatVp } from '../../../shared/utils/pricing';
-import { formatIsoDate, sortBatchesByExpiry } from '../../../shared/utils/inventory';
+import { formatIsoDate, isExpired, sortBatchesByExpiry } from '../../../shared/utils/inventory';
 import { roundVp } from '../../../shared/utils/pricing';
 import type { Batch, IsoDate, Product } from '../../../shared/types';
 
@@ -41,6 +41,18 @@ const BatchTable: React.FC<BatchTableProps> = ({
     const nameOf  = (b: Batch) => b.productName ?? byId.get(b.productId)?.name ?? b.productId;
     const valueOf = (b: Batch) => b.quantity * (byId.get(b.productId)?.price50 ?? 0);
     const vpOf    = (b: Batch) => roundVp(b.quantity * (byId.get(b.productId)?.vp ?? 0));
+
+    /**
+     * An expired lot with stock still on it is the one row the user is here to
+     * act on, so its write-off is a labelled button rather than another grey
+     * glyph (06_UI_REFERENCE §2). Everywhere else it stays an icon, so the
+     * emphasis means something.
+     *
+     * The icon is `faCircleMinus`, not a trash can: this removes stock and
+     * records a WRITE_OFF movement, keeping the batch row at zero. A trash can
+     * reads as "delete this row", which is the one thing it does not do.
+     */
+    const needsWriteOff = (b: Batch) => b.quantity > 0 && isExpired(b.expiryDate, today);
 
     return (
         <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
@@ -106,21 +118,35 @@ const BatchTable: React.FC<BatchTableProps> = ({
                                 <td className="p-4 text-right font-mono text-slate-600 hidden lg:table-cell">{formatInr(valueOf(batch))}</td>
                                 <td className="p-4 text-right font-mono text-slate-500 hidden lg:table-cell">{formatVp(vpOf(batch))}</td>
                                 <td className="p-4 text-right whitespace-nowrap">
-                                    <button
-                                        onClick={() => onEdit(batch)}
-                                        aria-label={`Correct ${nameOf(batch)} expiring ${batch.expiryDate}`}
-                                        className="cursor-pointer text-slate-400 hover:text-primary p-2 rounded-lg hover:bg-blue-50 transition-colors focus:outline-none focus:ring-2 focus:ring-primary/30"
-                                    >
-                                        <FontAwesomeIcon icon={faPen} />
-                                    </button>
-                                    <button
-                                        onClick={() => onWriteOff(batch)}
-                                        disabled={batch.quantity <= 0}
-                                        aria-label={`Write off ${nameOf(batch)} expiring ${batch.expiryDate}`}
-                                        className="cursor-pointer text-slate-400 hover:text-red-600 p-2 rounded-lg hover:bg-red-50 transition-colors disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-transparent focus:outline-none focus:ring-2 focus:ring-red-300"
-                                    >
-                                        <FontAwesomeIcon icon={faTrashCan} />
-                                    </button>
+                                    <div className="inline-flex items-center justify-end gap-1">
+                                        <button
+                                            onClick={() => onEdit(batch)}
+                                            aria-label={`Correct ${nameOf(batch)} expiring ${batch.expiryDate}`}
+                                            className="cursor-pointer text-slate-400 hover:text-primary p-2 rounded-lg hover:bg-blue-50 transition-colors focus:outline-none focus:ring-2 focus:ring-primary/30"
+                                        >
+                                            <FontAwesomeIcon icon={faPen} />
+                                        </button>
+                                        {needsWriteOff(batch) ? (
+                                            <button
+                                                onClick={() => onWriteOff(batch)}
+                                                aria-label={`Write off ${nameOf(batch)} expiring ${batch.expiryDate}`}
+                                                className="cursor-pointer inline-flex items-center gap-1.5 rounded-lg border border-red-200 bg-red-50 px-2.5 py-1.5 text-xs font-bold text-red-700 hover:bg-red-100 transition-colors focus:outline-none focus:ring-2 focus:ring-red-300"
+                                            >
+                                                <FontAwesomeIcon icon={faCircleMinus} />
+                                                Write off
+                                            </button>
+                                        ) : (
+                                            <button
+                                                onClick={() => onWriteOff(batch)}
+                                                disabled={batch.quantity <= 0}
+                                                aria-label={`Write off ${nameOf(batch)} expiring ${batch.expiryDate}`}
+                                                title="Write off — removes the stock and logs a WRITE_OFF movement"
+                                                className="cursor-pointer text-slate-400 hover:text-red-600 p-2 rounded-lg hover:bg-red-50 transition-colors disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-transparent focus:outline-none focus:ring-2 focus:ring-red-300"
+                                            >
+                                                <FontAwesomeIcon icon={faCircleMinus} />
+                                            </button>
+                                        )}
+                                    </div>
                                 </td>
                             </tr>
                         ))}
@@ -168,7 +194,7 @@ const BatchTable: React.FC<BatchTableProps> = ({
                                 <dd className="font-mono text-slate-600">{formatVp(vpOf(batch))}</dd>
                             </div>
                         </dl>
-                        <div className="flex justify-end gap-1 mt-2">
+                        <div className="flex justify-end items-center gap-1 mt-2">
                             <button
                                 onClick={() => onEdit(batch)}
                                 aria-label={`Correct ${nameOf(batch)}`}
@@ -176,14 +202,25 @@ const BatchTable: React.FC<BatchTableProps> = ({
                             >
                                 <FontAwesomeIcon icon={faPen} />
                             </button>
-                            <button
-                                onClick={() => onWriteOff(batch)}
-                                disabled={batch.quantity <= 0}
-                                aria-label={`Write off ${nameOf(batch)}`}
-                                className="cursor-pointer text-slate-400 hover:text-red-600 p-2 rounded-lg hover:bg-red-50 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-                            >
-                                <FontAwesomeIcon icon={faTrashCan} />
-                            </button>
+                            {needsWriteOff(batch) ? (
+                                <button
+                                    onClick={() => onWriteOff(batch)}
+                                    aria-label={`Write off ${nameOf(batch)}`}
+                                    className="cursor-pointer inline-flex items-center gap-1.5 rounded-lg border border-red-200 bg-red-50 px-2.5 py-1.5 text-xs font-bold text-red-700 hover:bg-red-100 transition-colors"
+                                >
+                                    <FontAwesomeIcon icon={faCircleMinus} />
+                                    Write off
+                                </button>
+                            ) : (
+                                <button
+                                    onClick={() => onWriteOff(batch)}
+                                    disabled={batch.quantity <= 0}
+                                    aria-label={`Write off ${nameOf(batch)}`}
+                                    className="cursor-pointer text-slate-400 hover:text-red-600 p-2 rounded-lg hover:bg-red-50 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                                >
+                                    <FontAwesomeIcon icon={faCircleMinus} />
+                                </button>
+                            )}
                         </div>
                     </div>
                 ))}

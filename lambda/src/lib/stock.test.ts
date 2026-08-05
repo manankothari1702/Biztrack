@@ -4,7 +4,9 @@ import {
     StockChangeError,
     applyStockChange,
     earliestExpiryOf,
+    planInvoiceStock,
     type ApplyStockChangeInput,
+    type InvoiceStockInput,
     type ProductSnapshot,
     type StockChange,
 } from './stock';
@@ -437,6 +439,208 @@ describe('transaction size', () => {
 });
 
 // ── Realistic end-to-end shapes ─────────────────────────────────────────────
+
+// ── Invoices: direction, reversal, multi-line ───────────────────────────────
+
+const SALE = (lines: InvoiceStockInput['lines']): InvoiceStockInput =>
+    ({ type: 'SALE', invoiceNo: 'INV-2026-0001', lines });
+const PURCHASE = (lines: InvoiceStockInput['lines']): InvoiceStockInput =>
+    ({ type: 'PURCHASE', invoiceNo: 'PUR-2026-0007', lines });
+
+const LINE = { productId: 'p_1', name: 'Formula 1 - Strawberry', quantity: 2, expiryDate: '2026-11-15' };
+
+describe('planInvoiceStock — forward', () => {
+    it('a SALE removes stock: negative delta, OUT movement', () => {
+        const [change] = planInvoiceStock(SALE([LINE]));
+        expect(change).toMatchObject({
+            productId: 'p_1', productName: 'Formula 1 - Strawberry',
+            expiryDate: '2026-11-15', delta: -2, type: 'OUT',
+            reason: 'Sale — INV-2026-0001',
+        });
+    });
+
+    it('a PURCHASE adds stock: positive delta, IN movement', () => {
+        const [change] = planInvoiceStock(PURCHASE([{ ...LINE, quantity: 12 }]));
+        expect(change).toMatchObject({
+            delta: 12, type: 'IN', reason: 'Purchase — PUR-2026-0007',
+        });
+    });
+
+    it('emits one change per line, preserving order', () => {
+        const changes = planInvoiceStock(SALE([
+            { ...LINE, quantity: 2 },
+            { ...LINE, quantity: 3, expiryDate: '2027-06-30' },
+        ]));
+        expect(changes.map(c => c.delta)).toEqual([-2, -3]);
+    });
+});
+
+describe('planInvoiceStock — reversal', () => {
+    it('cancelling a SALE ADDS stock back: positive delta, IN movement', () => {
+        const [change] = planInvoiceStock(SALE([LINE]), { reverse: true });
+        expect(change).toMatchObject({
+            expiryDate: '2026-11-15', delta: 2, type: 'IN',
+            reason: 'Sale cancelled — INV-2026-0001',
+        });
+    });
+
+    it('cancelling a PURCHASE REMOVES stock: negative delta, OUT movement', () => {
+        const [change] = planInvoiceStock(PURCHASE([{ ...LINE, quantity: 12 }]), { reverse: true });
+        expect(change).toMatchObject({
+            delta: -12, type: 'OUT',
+            reason: 'Purchase cancelled — PUR-2026-0007',
+        });
+    });
+
+    it('returns stock to the SAME lot it left, not to a new one', () => {
+        // The expiry is part of the batch key, so a reversal that landed on a
+        // different date would leave the original lot short and invent stock
+        // somewhere else — with the product roll-up none the wiser.
+        const forward = planInvoiceStock(SALE([LINE]));
+        const back    = planInvoiceStock(SALE([LINE]), { reverse: true });
+        expect(back[0].expiryDate).toBe(forward[0].expiryDate);
+    });
+
+    it('is an exact inverse — forward then reverse nets to zero per line', () => {
+        const lines = [
+            { ...LINE, quantity: 2, expiryDate: '2026-11-15' },
+            { ...LINE, quantity: 3, expiryDate: '2027-06-30' },
+            { ...LINE, quantity: 7, productId: 'p_2', expiryDate: '2027-03-15' },
+        ];
+        for (const invoice of [SALE(lines), PURCHASE(lines)]) {
+            const forward = planInvoiceStock(invoice);
+            const back    = planInvoiceStock(invoice, { reverse: true });
+            expect(forward.map((c, i) => c.delta + back[i].delta)).toEqual([0, 0, 0]);
+        }
+    });
+
+    it('a PURCHASE reversal inherits the oversell guard, so sold stock blocks it', () => {
+        // This is what turns into 409 STOCK_ALREADY_SOLD: nothing in the
+        // reversal path asks for the guard, it falls out of the delta's sign.
+        const plan = build(
+            planInvoiceStock(PURCHASE([{ ...LINE, quantity: 12 }]), { reverse: true }),
+        );
+        expect(batchUpdates(plan)[0].ConditionExpression).toBe('#qty >= :magnitude');
+        expect(batchUpdates(plan)[0].ExpressionAttributeValues![':magnitude']).toBe(12);
+    });
+
+    it('a SALE reversal is unguarded — adding stock back can never overdraw', () => {
+        const plan = build(planInvoiceStock(SALE([LINE]), { reverse: true }));
+        expect(batchUpdates(plan)[0].ConditionExpression).toBeUndefined();
+    });
+});
+
+describe('planInvoiceStock — multi-line roll-up aggregation', () => {
+    it('collapses two lines of ONE product at DIFFERENT expiries into ONE roll-up write', () => {
+        // The trap this guards: DynamoDB rejects a transaction that touches the
+        // same item twice, and both lines target PRODUCT#p_1.
+        const plan = build(planInvoiceStock(SALE([
+            { ...LINE, quantity: 2, expiryDate: '2026-11-15' },
+            { ...LINE, quantity: 3, expiryDate: '2027-06-30' },
+        ])));
+
+        expect(batchUpdates(plan)).toHaveLength(2);
+        expect(productUpdates(plan)).toHaveLength(1);
+        expect(productUpdates(plan)[0].ExpressionAttributeValues![':delta']).toBe(-5);
+        expect(puts(plan)).toHaveLength(2);            // one movement per LINE
+    });
+
+    it('collapses two lines at the SAME (product, expiry) into one batch write', () => {
+        const plan = build(planInvoiceStock(PURCHASE([
+            { ...LINE, quantity: 12, expiryDate: '2027-06-30' },
+            { ...LINE, quantity:  6, expiryDate: '2027-06-30' },
+        ])));
+        expect(batchUpdates(plan)).toHaveLength(1);
+        expect(batchUpdates(plan)[0].ExpressionAttributeValues![':delta']).toBe(18);
+    });
+
+    it('never emits a duplicate key across a mixed multi-product invoice', () => {
+        const plan = build(planInvoiceStock(SALE([
+            { ...LINE, productId: 'p_1', quantity: 2, expiryDate: '2026-11-15' },
+            { ...LINE, productId: 'p_1', quantity: 1, expiryDate: '2026-11-15' },
+            { ...LINE, productId: 'p_1', quantity: 3, expiryDate: '2027-06-30' },
+            { ...LINE, productId: 'p_2', quantity: 1, expiryDate: '2027-03-15' },
+        ])));
+        const keys = plan.items.map(i =>
+            'Update' in i ? `${i.Update!.Key!.PK}|${i.Update!.Key!.SK}`
+                          : `${i.Put!.Item!.PK}|${i.Put!.Item!.SK}`);
+        expect(new Set(keys).size).toBe(keys.length);
+    });
+
+    it('aggregates the reversal of a multi-line invoice too', () => {
+        const plan = build(planInvoiceStock(SALE([
+            { ...LINE, quantity: 2, expiryDate: '2026-11-15' },
+            { ...LINE, quantity: 3, expiryDate: '2027-06-30' },
+        ]), { reverse: true }));
+
+        expect(productUpdates(plan)).toHaveLength(1);
+        expect(productUpdates(plan)[0].ExpressionAttributeValues![':delta']).toBe(5);
+    });
+});
+
+describe('planInvoiceStock — quantity validation', () => {
+    it('rejects a negative quantity rather than silently inverting the line', () => {
+        expect(() => planInvoiceStock(SALE([{ ...LINE, quantity: -2 }])))
+            .toThrow(/quantity must be a positive whole number/);
+    });
+
+    it('rejects zero and fractional quantities', () => {
+        expect(() => planInvoiceStock(SALE([{ ...LINE, quantity: 0 }]))).toThrow(StockChangeError);
+        expect(() => planInvoiceStock(SALE([{ ...LINE, quantity: 1.5 }]))).toThrow(StockChangeError);
+    });
+
+    it('names the offending line index', () => {
+        expect(() => planInvoiceStock(SALE([LINE, { ...LINE, quantity: 0 }])))
+            .toThrow(/line 1 \(p_1\)/);
+    });
+
+    it('returns an empty plan for an invoice with no lines', () => {
+        expect(planInvoiceStock(SALE([]))).toEqual([]);
+    });
+});
+
+describe('transaction size — caller-reserved items', () => {
+    const saleOf = (n: number) => {
+        const products: Record<string, ProductSnapshot> = {};
+        const lines: InvoiceStockInput['lines'] = [];
+        for (let i = 0; i < n; i++) {
+            products[`p_${i}`] = { id: `p_${i}`, name: `Product ${i}` };
+            lines.push({ productId: `p_${i}`, quantity: 1, expiryDate: '2027-06-30' });
+        }
+        return { products, lines };
+    };
+
+    it('a 30-line invoice plus its invoice Put fits, with headroom to spare', () => {
+        // The real worst case under the server-side cap: 30 DISTINCT products
+        // is 90 items, +1 for the invoice Put = 91. Nowhere near the ceiling,
+        // which is why `reservedItems` below is a guard rather than a live
+        // constraint — it starts mattering only if the 30-line cap rises.
+        const { products, lines } = saleOf(30);
+        const plan = build(planInvoiceStock(SALE(lines)), products, { reservedItems: 1 });
+        expect(plan.items).toHaveLength(90);
+        expect(plan.items.length + 1).toBeLessThanOrEqual(MAX_TRANSACT_ITEMS);
+    });
+
+    it('counts the caller\'s reserved items against the ceiling', () => {
+        // Built to land on EXACTLY 100 items: 33 distinct products (99) plus a
+        // 34th change that merges into an existing batch and roll-up, adding
+        // only its movement. At 100 the plan is legal on its own and illegal
+        // the moment the caller appends the invoice Put — the case that would
+        // otherwise pass here and fail at DynamoDB.
+        const products: Record<string, ProductSnapshot> = {};
+        const changes: StockChange[] = [];
+        for (let i = 0; i < 33; i++) {
+            products[`p_${i}`] = { id: `p_${i}`, name: `Product ${i}` };
+            changes.push({ productId: `p_${i}`, expiryDate: '2027-06-30', delta: -1, type: 'OUT' });
+        }
+        changes.push({ productId: 'p_0', expiryDate: '2027-06-30', delta: -1, type: 'OUT' });
+
+        expect(build(changes, products).items).toHaveLength(MAX_TRANSACT_ITEMS);
+        expect(() => build(changes, products)).not.toThrow();
+        expect(() => build(changes, products, { reservedItems: 1 }))
+            .toThrow(/100 transaction items plus 1 reserved by the caller/);
+    });
+});
 
 describe('worked scenario — 3-line purchase then a 2-line sale', () => {
     it('builds a purchase that creates three batches and two roll-ups', () => {

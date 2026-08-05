@@ -205,6 +205,46 @@ test and synth time on a trusted machine against trusted input, so the practical
 low. `npm audit fix` clears them via routine jest/ts-jest patch bumps; folded into the next
 dependency pass rather than done piecemeal.
 
+### FU-B11 · No component test coverage in `src/`  → surfaced 2026-07-23
+
+**Deliberately deferred, not an oversight.** `src/` has four test files —
+`shared/utils/pricing`, `shared/utils/pagination`, `shared/utils/inventory`,
+`shared/services/apiParams` — and every one tests a pure function. Zero components are
+rendered anywhere in the suite.
+
+**The bug that proves the gap.** `ProductSummaryTable` summed the `products` prop for its
+TOTAL row, but the page passes that prop the paginated slice (50 of 57 from
+`useInventory`'s `paginatedProducts`). The row was labelled "Total" and sat directly under
+valuation cards counting all 57 — two totals on one screen, differing, with nothing saying
+why.
+
+What makes it the motivating case: **`inventoryTotals` was correct and thoroughly
+unit-tested the whole time.** `inventory.test.ts` covers it, including the round-VP-once
+rule and zero-quantity products. The defect was entirely in *which array the component
+handed it* — wiring, not logic. No test over pure functions can observe that, no matter how
+complete. A render test asserting "the TOTAL row equals the cards when the catalogue spans
+more than one page" catches it on the first run.
+
+**What it would take:**
+- `vite.config.ts` → `test.environment: 'node'` becomes `'jsdom'`. The `include` glob
+  already lists `src/**/*.test.tsx`, so the file pattern needs no change — the environment
+  is the only blocker.
+- Add `jsdom`, `@testing-library/react`, `@testing-library/jest-dom` as devDependencies.
+- Note the environment switch is global. Existing pure-logic tests would start running
+  under jsdom (slower, and they gain a DOM they do not want); a per-file
+  `// @vitest-environment jsdom` docblock on component tests only is the narrower option
+  and keeps the existing four untouched.
+
+**Trigger — revisit when a second bug of this shape appears.** One prop-wiring defect is a
+fix; two is a pattern, and at that point the toolchain pays for itself. Until then the cost
+(new dependency surface, a second test idiom to maintain, slower suite) outruns the
+evidence. Do not add it speculatively.
+
+**First tests to write when the trigger fires**, highest value first: the
+`ProductSummaryTable` totals-vs-page-slice case above; `BatchTable`'s write-off affordance
+(labelled on expired-with-stock rows, disabled at `quantity <= 0`); and the
+`InventoryValueCards` / TOTAL row agreement that ties the two together.
+
 ### FU-B8 · gstack upgrade + skipped setup prompts  → tooling, surfaced 2026-07-23
 
 **Not blocking anything.** Deferred until Phase 3 closes, to avoid changing tooling

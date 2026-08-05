@@ -116,12 +116,33 @@ describe('inventory Lambda functions', () => {
         }
     });
 
-    test('the stack now declares 11 biztrack functions', () => {
-        // 8 pre-existing + products + batches + stockMovements. Counted by name
-        // rather than resource type: CDK also synthesises its own unnamed helper
-        // (S3AutoDeleteObjects, from autoDeleteObjects on the site bucket), and a
-        // raw resourceCountIs would break whenever CDK adds another internal one.
-        const named = Object.values(template.findResources('AWS::Lambda::Function'))
+    test('invoices is wired to dist/invoices.handler', () => {
+        // Found by HANDLER, not FunctionName: invoices is the first function
+        // under the "no hardcoded physical names on new resources" rule, so it
+        // has no stable name to assert on.
+        template.hasResourceProperties('AWS::Lambda::Function', {
+            Handler: 'dist/invoices.handler',
+        });
+    });
+
+    test('the invoices function carries no hardcoded physical name', () => {
+        // The point of the rule: a second stack can coexist only if new
+        // resources let CloudFormation name them. Its 11 siblings are still
+        // named — migrating those is FU-B6, not this phase.
+        const invoices = appFunctions().find(fn => fn.Properties?.Handler === 'dist/invoices.handler');
+        expect(invoices).toBeDefined();
+        expect(invoices!.Properties?.FunctionName).toBeUndefined();
+    });
+
+    test('the stack declares 12 app functions — 11 named + the unnamed invoices', () => {
+        // Counted by HANDLER (`dist/*.handler`), which is what separates our
+        // functions from CDK's own internal helper (S3AutoDeleteObjects, handler
+        // `index.handler`). Name-counting would silently miss the unnamed
+        // invoices function, so it has to be handler-based now.
+        const app = appFunctions();
+        expect(app).toHaveLength(12);
+
+        const named = app
             .map(fn => fn.Properties?.FunctionName)
             .filter((n): n is string => typeof n === 'string' && n.startsWith('biztrack-'));
 
@@ -138,8 +159,20 @@ describe('inventory Lambda functions', () => {
             'biztrack-whatsapp-scheduler',
             'biztrack-whatsapp-test',
         ]);
+        // 11 named + 1 unnamed (invoices) = 12.
+        expect(named).toHaveLength(11);
     });
 });
+
+/**
+ * Our application Lambda functions — every one built from the shared asset,
+ * identified by its `dist/<file>.handler`. This deliberately EXCLUDES CDK's own
+ * S3AutoDeleteObjects helper (handler `index.handler`), and unlike a name-based
+ * filter it still catches functions with no hardcoded FunctionName.
+ */
+const appFunctions = () =>
+    Object.values(template.findResources('AWS::Lambda::Function'))
+        .filter(fn => String(fn.Properties?.Handler ?? '').startsWith('dist/'));
 
 describe('Lambda runtime', () => {
     // AWS blocks UPDATES to functions on a deprecated runtime, so drifting past
@@ -155,23 +188,24 @@ describe('Lambda runtime', () => {
         'nodejs20.x',   // deprecated 2026-04-30, updates blocked 2027-03-03
     ];
 
-    const biztrackRuntimes = () =>
-        Object.values(template.findResources('AWS::Lambda::Function'))
-            .filter(fn => String(fn.Properties?.FunctionName ?? '').startsWith('biztrack-'))
-            .map(fn => String(fn.Properties?.Runtime));
+    // Identified by handler, not name — so the unnamed invoices function is
+    // covered here too. A name-based filter would silently skip it, and a
+    // function on a deprecated runtime that no test checks is the whole failure
+    // this block exists to prevent.
+    const appRuntimes = () => appFunctions().map(fn => String(fn.Properties?.Runtime));
 
     test('no function runs a deprecated runtime', () => {
-        const offenders = biztrackRuntimes().filter(r => DEPRECATED.includes(r));
+        const offenders = appRuntimes().filter(r => DEPRECATED.includes(r));
         expect(offenders).toEqual([]);
     });
 
     test('every function shares one runtime — no accidental drift', () => {
-        const distinct = [...new Set(biztrackRuntimes())];
+        const distinct = [...new Set(appRuntimes())];
         expect(distinct).toHaveLength(1);
     });
 
-    test('all 11 are covered by that check', () => {
-        expect(biztrackRuntimes()).toHaveLength(11);
+    test('all 12 app functions are covered by that check', () => {
+        expect(appRuntimes()).toHaveLength(12);
     });
 });
 
@@ -227,17 +261,104 @@ describe('inventory API routes', () => {
     });
 });
 
+describe('invoice API routes', () => {
+    // Resolve a resource id by walking its PathPart chain, so the `{id}` under
+    // /invoices is never confused with the `{id}` under /products or /clients —
+    // each of those synthesises the same PathPart. The first segment
+    // (`invoices`) is unique at the API root, so it anchors the walk; every
+    // deeper segment must additionally sit under the previous logical id.
+    const resourceIdByPath = (segments: string[]): string => {
+        let currentId = '';
+        segments.forEach((seg, i) => {
+            const matches = Object.entries(template.findResources('AWS::ApiGateway::Resource', {
+                Properties: { PathPart: seg },
+            }));
+            const entry = i === 0
+                ? matches[0]
+                : matches.find(([, r]) => r.Properties.ParentId?.Ref === currentId);
+            if (!entry) throw new Error(`no resource "${seg}" under /${segments.slice(0, i + 1).join('/')}`);
+            currentId = entry[0];
+        });
+        return currentId;
+    };
+
+    const methodsOn = (resourceId: string): string[] =>
+        Object.values(template.findResources('AWS::ApiGateway::Method'))
+            .filter(m => m.Properties.ResourceId?.Ref === resourceId)
+            .map(m => String(m.Properties.HttpMethod))
+            .sort();
+
+    test('/invoices exposes GET + POST (+ CORS OPTIONS)', () => {
+        expect(methodsOn(resourceIdByPath(['invoices']))).toEqual(['GET', 'OPTIONS', 'POST']);
+    });
+
+    test('/invoices/{id} exposes GET + PUT + DELETE', () => {
+        expect(methodsOn(resourceIdByPath(['invoices', '{id}']))).toEqual(['DELETE', 'GET', 'OPTIONS', 'PUT']);
+    });
+
+    test('/invoices/{id}/finalize is POST-only', () => {
+        expect(methodsOn(resourceIdByPath(['invoices', '{id}', 'finalize']))).toEqual(['OPTIONS', 'POST']);
+    });
+
+    test('/invoices/{id}/cancel is POST-only', () => {
+        expect(methodsOn(resourceIdByPath(['invoices', '{id}', 'cancel']))).toEqual(['OPTIONS', 'POST']);
+    });
+
+    test('every invoice method is Cognito-authorized', () => {
+        for (const path of [['invoices'], ['invoices', '{id}'], ['invoices', '{id}', 'finalize'], ['invoices', '{id}', 'cancel']]) {
+            const id = resourceIdByPath(path);
+            const authTypes = Object.values(template.findResources('AWS::ApiGateway::Method'))
+                .filter(m => m.Properties.ResourceId?.Ref === id && m.Properties.HttpMethod !== 'OPTIONS')
+                .map(m => m.Properties.AuthorizationType);
+            expect(authTypes.every(t => t === 'COGNITO_USER_POOLS')).toBe(true);
+            expect(authTypes.length).toBeGreaterThan(0);
+        }
+    });
+
+    test('all four invoice methods route to the same one Lambda', () => {
+        // One handler owns create/list/get/update/finalize/cancel/delete; the
+        // routes must not accidentally fan out to different functions.
+        const invoiceIds = new Set([
+            resourceIdByPath(['invoices']),
+            resourceIdByPath(['invoices', '{id}']),
+            resourceIdByPath(['invoices', '{id}', 'finalize']),
+            resourceIdByPath(['invoices', '{id}', 'cancel']),
+        ]);
+        const integrationUris = Object.values(template.findResources('AWS::ApiGateway::Method'))
+            .filter(m => invoiceIds.has(m.Properties.ResourceId?.Ref) && m.Properties.HttpMethod !== 'OPTIONS')
+            .map(m => JSON.stringify(m.Properties.Integration?.Uri));
+        expect(new Set(integrationUris).size).toBe(1);
+    });
+});
+
 describe('throttling', () => {
-    test('POST /products/bulk is capped like /clients/bulk', () => {
+    const methodSettings = () => {
         const stage = Object.values(template.findResources('AWS::ApiGateway::Stage'))[0];
-        const settings = stage.Properties.MethodSettings as {
+        return stage.Properties.MethodSettings as {
             HttpMethod: string; ResourcePath: string;
             ThrottlingRateLimit: number; ThrottlingBurstLimit: number;
         }[];
+    };
 
-        const bulk = settings.find(s => s.ResourcePath === '/~1products~1bulk' && s.HttpMethod === 'POST');
+    test('POST /products/bulk is capped like /clients/bulk', () => {
+        const bulk = methodSettings().find(s => s.ResourcePath === '/~1products~1bulk' && s.HttpMethod === 'POST');
         expect(bulk).toBeDefined();
         expect(bulk!.ThrottlingRateLimit).toBe(2);
         expect(bulk!.ThrottlingBurstLimit).toBe(5);
+    });
+
+    test('POST /invoices carries the same 2/5 cap as the bulk writes', () => {
+        // The invoice create is a transaction; it belongs in the same weight
+        // class as the bulk imports, not the default 25/50.
+        const invoices = methodSettings().find(s => s.ResourcePath === '/~1invoices' && s.HttpMethod === 'POST');
+        expect(invoices).toBeDefined();
+        expect(invoices!.ThrottlingRateLimit).toBe(2);
+        expect(invoices!.ThrottlingBurstLimit).toBe(5);
+    });
+
+    test('finalize and cancel are NOT separately throttled — one-per-invoice, no fan-out', () => {
+        const paths = methodSettings().map(s => s.ResourcePath);
+        expect(paths).not.toContain('/~1invoices~1{id}~1finalize');
+        expect(paths).not.toContain('/~1invoices~1{id}~1cancel');
     });
 });

@@ -255,6 +255,7 @@ const Inventory: React.FC = () => {
                         <>
                             <ProductSummaryTable
                                 products={products}
+                                totalsProducts={allProducts}
                                 loading={loading}
                                 today={today}
                                 onEdit={p => { setEditingProduct(p); setProductModalOpen(true); }}

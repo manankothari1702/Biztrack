@@ -351,9 +351,9 @@ export class BiztrackStack extends cdk.Stack {
         // NOTE: the numbers at each call site assume the quota is raised to ~1000.
         // Before enabling, recompute against the ACTUAL confirmed limit and re-verify
         // sum(reserved) <= (limit - 100). Planned: user 60, clients 50, dashboard 30,
-        // tasks 30, products 30, batches 20, stockMovements 10, whatsappTest 5,
-        // scheduler 2, purge 2, postConfirmation UNRESERVED (signup critical-path)
-        // = 239 total (was 179 before the inventory handlers).
+        // tasks 30, products 30, batches 20, invoices 20, stockMovements 10,
+        // whatsappTest 5, scheduler 2, purge 2, postConfirmation UNRESERVED (signup
+        // critical-path) = 259 total (was 239 before invoices, 179 before inventory).
         const reserveConcurrency =
             this.node.tryGetContext('reserveConcurrency') === true ||
             this.node.tryGetContext('reserveConcurrency') === 'true';
@@ -423,6 +423,21 @@ export class BiztrackStack extends cdk.Stack {
             code: lambdaCode,
             handler: 'dist/stockMovements.handler',
             ...rc(10), // cheapest of the three; one list query
+        });
+
+        // Sales + purchases. Create/finalize/cancel each run a DynamoDB
+        // transaction via lib/stock.ts (invoice + batches + roll-ups + movements).
+        //
+        // No `functionName`: per the phase constraint, NEW resources carry no
+        // hardcoded physical name, so CDK generates one. Its 11 siblings are
+        // still named — parameterising all of them is FU-B6 (the dev-stack
+        // prerequisite), not this phase. Referenced everywhere by construct, so
+        // the generated name is never needed in code.
+        const invoicesLambda = new lambda.Function(this, 'InvoicesHandler', {
+            ...lambdaDefaults,
+            code: lambdaCode,
+            handler: 'dist/invoices.handler',
+            ...rc(20), // transaction-bearing, interactive — mirrors batches
         });
 
         // Dashboard (counts + lists)
@@ -538,6 +553,13 @@ export class BiztrackStack extends cdk.Stack {
                     // Excel catalogue import: reads every existing product, then
                     // writes in batches. Same cost profile as /clients/bulk.
                     '/products/bulk/POST':  { throttlingRateLimit: 2, throttlingBurstLimit: 5 },
+                    // Invoice create: a BatchGet + counter update + a multi-item
+                    // transaction (invoice + batches + roll-ups + movements). The
+                    // heaviest write in the app after the bulk imports, so it gets
+                    // the same cap. finalize/cancel are {id} sub-paths and not
+                    // separately throttled — they run the same transaction but are
+                    // one-per-invoice, not fan-out.
+                    '/invoices/POST':       { throttlingRateLimit: 2, throttlingBurstLimit: 5 },
                 },
             },
         });
@@ -615,6 +637,29 @@ export class BiztrackStack extends cdk.Stack {
         // 405; movements are written solely by lib/stock.ts inside transactions.
         const stockMovementsResource = api.root.addResource('stock-movements');
         stockMovementsResource.addMethod('GET', new apigateway.LambdaIntegration(stockMovementsLambda), authOptions);
+
+        // ── Invoices (sales + purchases) ────────────────────────────────────
+
+        // /invoices  GET (list, newest-first via GSI6) + POST (create, ?finalize)
+        const invoicesResource = api.root.addResource('invoices');
+        invoicesResource.addMethod('GET',  new apigateway.LambdaIntegration(invoicesLambda), authOptions);
+        invoicesResource.addMethod('POST', new apigateway.LambdaIntegration(invoicesLambda), authOptions);
+
+        // /invoices/{id}  GET + PUT (Draft only) + DELETE (Draft only)
+        const invoiceResource = invoicesResource.addResource('{id}');
+        invoiceResource.addMethod('GET',    new apigateway.LambdaIntegration(invoicesLambda), authOptions);
+        invoiceResource.addMethod('PUT',    new apigateway.LambdaIntegration(invoicesLambda), authOptions);
+        invoiceResource.addMethod('DELETE', new apigateway.LambdaIntegration(invoicesLambda), authOptions);
+
+        // /invoices/{id}/finalize  POST — re-reads, re-prices, applies stock.
+        // The handler routes on the /finalize suffix via event.resource, so the
+        // literal segment must exist as its own API Gateway resource.
+        const invoiceFinalize = invoiceResource.addResource('finalize');
+        invoiceFinalize.addMethod('POST', new apigateway.LambdaIntegration(invoicesLambda), authOptions);
+
+        // /invoices/{id}/cancel  POST — reverses stock (SALE adds back, PURCHASE removes).
+        const invoiceCancel = invoiceResource.addResource('cancel');
+        invoiceCancel.addMethod('POST', new apigateway.LambdaIntegration(invoicesLambda), authOptions);
 
         // /dashboard
         const dashboardResource = api.root.addResource('dashboard');

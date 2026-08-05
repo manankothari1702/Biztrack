@@ -70,6 +70,17 @@ export interface ApplyStockChangeInput {
     now: string;
     /** Injected id factory (uuid in production). */
     newId: () => string;
+    /**
+     * Items the CALLER will append to the SAME transaction — for invoices, the
+     * invoice `Put` (1).
+     *
+     * Declared here so the ceiling check below covers the whole transaction
+     * rather than only this function's share of it. Without it a plan of
+     * exactly 100 items passes, the caller appends its own, and DynamoDB
+     * rejects 101 at the API — a failure that unit tests cannot see and that
+     * only appears on the largest invoices.
+     */
+    reservedItems?: number;
 }
 
 /** The audit row written for each change. */
@@ -350,13 +361,101 @@ export const applyStockChange = (input: ApplyStockChangeInput): StockChangePlan 
         });
     }
 
-    if (items.length > MAX_TRANSACT_ITEMS) {
+    const reserved = input.reservedItems ?? 0;
+    if (items.length + reserved > MAX_TRANSACT_ITEMS) {
+        const caller = reserved ? ` plus ${reserved} reserved by the caller` : '';
         throw new StockChangeError(
-            `stock change needs ${items.length} transaction items, exceeding DynamoDB's limit of ${MAX_TRANSACT_ITEMS}`,
+            `stock change needs ${items.length} transaction items${caller}, exceeding DynamoDB's limit of ${MAX_TRANSACT_ITEMS}`,
         );
     }
 
     return { items, movements, productsNeedingExpiryRecompute };
+};
+
+// ── Invoices ────────────────────────────────────────────────────────────────
+
+/** The parts of an invoice line the stock engine needs. Prices are irrelevant here. */
+export interface InvoiceStockLine {
+    productId: string;
+    /** Snapshot name, for the movement log. */
+    name?: string;
+    /** Always POSITIVE. Direction comes from the invoice, never from here. */
+    quantity: number;
+    /** SALE: the lot sold from. PURCHASE: the incoming shipment's expiry. */
+    expiryDate: string;
+}
+
+export interface InvoiceStockInput {
+    type: 'SALE' | 'PURCHASE';
+    /** Audit text for every movement, e.g. `INV-2026-0001`. */
+    invoiceNo: string;
+    lines: readonly InvoiceStockLine[];
+}
+
+/**
+ * Turn an invoice into stock changes — forward on finalize, backward on cancel.
+ *
+ * ONE function covers both directions deliberately. A separate `reverseInvoice`
+ * could drift from its forward twin — a fix applied to one and not the other —
+ * and the drift would be silent, because stock that comes back wrong on a
+ * cancel looks exactly like stock that was never sold. Here the entire
+ * direction table is a single XOR, so forward and reverse can only disagree by
+ * being wrong for both:
+ *
+ *   | type     | reverse | delta | movement |
+ *   |----------|---------|-------|----------|
+ *   | SALE     | no      |   −   | OUT      |
+ *   | SALE     | yes     |   +   | IN       |
+ *   | PURCHASE | no      |   +   | IN       |
+ *   | PURCHASE | yes     |   −   | OUT      |
+ *
+ * Reversal is not a delete. The original movements stay and cancelling adds
+ * opposing ones, so the log reads as what happened rather than as a tidied
+ * version of it.
+ *
+ * Multi-line invoices need nothing special here: `applyStockChange` already
+ * collapses per batch AND per product before building, so two lines of one
+ * product at different expiries become two batch writes and a SINGLE roll-up.
+ * Emitting one change per line is therefore correct, and keeps one movement per
+ * line in the audit log.
+ *
+ * A PURCHASE reversal removes stock, so it inherits the engine's oversell guard
+ * for free: if those units have since been sold the condition fails, DynamoDB
+ * cancels the transaction, and the handler answers 409 STOCK_ALREADY_SOLD.
+ */
+export const planInvoiceStock = (
+    invoice: InvoiceStockInput,
+    options: { reverse?: boolean } = {},
+): StockChange[] => {
+    const reverse = options.reverse ?? false;
+
+    // SALE removes stock, PURCHASE adds it; a reversal flips whichever it is.
+    const outgoing = (invoice.type === 'SALE') !== reverse;
+
+    const verb   = invoice.type === 'SALE' ? 'Sale' : 'Purchase';
+    const reason = reverse
+        ? `${verb} cancelled — ${invoice.invoiceNo}`
+        : `${verb} — ${invoice.invoiceNo}`;
+
+    return invoice.lines.map((line, index): StockChange => {
+        // `quantity` is the one field that must never carry a sign — it is what
+        // becomes `delta`. A negative here would invert the direction of the
+        // line, and the engine would see a perfectly well-formed change that
+        // moves stock the wrong way.
+        if (!Number.isInteger(line.quantity) || line.quantity <= 0) {
+            throw new StockChangeError(
+                `line ${index} (${line.productId}): quantity must be a positive whole number, got ${line.quantity}`,
+            );
+        }
+        return {
+            productId:   line.productId,
+            productName: line.name,
+            expiryDate:  line.expiryDate,
+            delta:       outgoing ? -line.quantity : line.quantity,
+            type:        outgoing ? 'OUT' : 'IN',
+            reason,
+        };
+    });
 };
 
 /**
