@@ -203,11 +203,43 @@ export class BiztrackStack extends cdk.Stack {
             autoDeleteObjects: true,
         });
 
+        // Security headers at the ingress (AI-EOS adoption, 2026-08-05). Before
+        // this, the distribution set none at all.
+        //
+        // Content-Security-Policy is deliberately ABSENT rather than guessed. A
+        // wrong CSP breaks a live SPA silently — the page renders blank and the
+        // only clue is in the browser console. It needs a report-only rollout
+        // measured against real traffic first; tracked as FU-EOS-3.
+        const securityHeaders = new cloudfront.ResponseHeadersPolicy(this, 'BiztrackSecurityHeaders', {
+            responseHeadersPolicyName: 'biztrack-security-headers',
+            comment: 'HSTS, nosniff, referrer policy and frame denial for the Biztrack SPA',
+            securityHeadersBehavior: {
+                strictTransportSecurity: {
+                    accessControlMaxAge: cdk.Duration.days(365),
+                    includeSubdomains: true,
+                    // preload stays OFF: submitting a *.cloudfront.net host to the
+                    // preload list is not ours to do, and it is not reversible quickly.
+                    preload: false,
+                    override: true,
+                },
+                contentTypeOptions: { override: true },              // X-Content-Type-Options: nosniff
+                referrerPolicy: {
+                    referrerPolicy: cloudfront.HeadersReferrerPolicy.STRICT_ORIGIN_WHEN_CROSS_ORIGIN,
+                    override: true,
+                },
+                frameOptions: {
+                    frameOption: cloudfront.HeadersFrameOption.DENY,  // the app is never framed
+                    override: true,
+                },
+            },
+        });
+
         const distribution = new cloudfront.Distribution(this, 'BiztrackCDN', {
             defaultBehavior: {
                 origin: origins.S3BucketOrigin.withOriginAccessControl(siteBucket),
                 viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
                 cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
+                responseHeadersPolicy: securityHeaders,
                 compress: true,
             },
             defaultRootObject: 'index.html',
@@ -376,6 +408,28 @@ export class BiztrackStack extends cdk.Stack {
         });
 
         userPool.addTrigger(cognito.UserPoolOperation.POST_CONFIRMATION, postConfirmationLambda);
+
+        // Health probe (AI-EOS platform contract §1). Unauthenticated and cheap:
+        // one DescribeTable control-plane call, no business table read. Detail is
+        // gated behind HEALTH_TOKEN, which is unset by default so detail cannot
+        // leak by misconfiguration. Set it with `-c healthToken=<value>` once a
+        // monitoring token exists in the password manager.
+        const healthLambda = new lambda.Function(this, 'HealthHandler', {
+            ...lambdaDefaults,
+            functionName: 'biztrack-health',
+            code: lambdaCode,
+            handler: 'dist/health.handler',
+            timeout: cdk.Duration.seconds(5),   // must stay pollable every 30s
+            memorySize: 128,
+            environment: {
+                ...commonEnv,
+                APP_VERSION:  String(this.node.tryGetContext('appVersion') ?? 'unknown'),
+                HEALTH_TOKEN: String(this.node.tryGetContext('healthToken') ?? ''),
+            },
+            // Intentionally UNRESERVED: it must answer even when the app is
+            // being throttled, otherwise monitoring goes blind exactly when it
+            // matters most.
+        });
 
         // Clients CRUD
         const clientsLambda = new lambda.Function(this, 'ClientsHandler', {
@@ -569,6 +623,14 @@ export class BiztrackStack extends cdk.Stack {
             authorizationType: apigateway.AuthorizationType.COGNITO,
         };
 
+        // /health — THE ONLY UNAUTHENTICATED ROUTE, deliberately.
+        // `authOptions` is omitted, not forgotten: a health check that needs a
+        // token cannot be polled by a load balancer or an uptime monitor, which
+        // is the entire point of the endpoint. Never add an authorizer here, and
+        // never remove this route (PLATFORM.md §1).
+        const healthResource = api.root.addResource('health');
+        healthResource.addMethod('GET', new apigateway.LambdaIntegration(healthLambda));
+
         // /clients  GET + POST
         const clientsResource = api.root.addResource('clients');
         clientsResource.addMethod('GET',  new apigateway.LambdaIntegration(clientsLambda), authOptions);
@@ -714,6 +776,11 @@ export class BiztrackStack extends cdk.Stack {
         new cdk.CfnOutput(this, 'CloudFrontUrl', {
             value: `https://${distribution.distributionDomainName}`,
             description: 'Frontend URL',
+        });
+
+        new cdk.CfnOutput(this, 'HealthUrl', {
+            value: `${api.url}health`,
+            description: 'Unauthenticated health probe - poll this for monitoring',
         });
 
         new cdk.CfnOutput(this, 'SiteBucketName', {

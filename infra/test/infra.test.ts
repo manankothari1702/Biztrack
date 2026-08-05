@@ -134,13 +134,14 @@ describe('inventory Lambda functions', () => {
         expect(invoices!.Properties?.FunctionName).toBeUndefined();
     });
 
-    test('the stack declares 12 app functions — 11 named + the unnamed invoices', () => {
+    test('the stack declares 13 app functions — 12 named + the unnamed invoices', () => {
         // Counted by HANDLER (`dist/*.handler`), which is what separates our
         // functions from CDK's own internal helper (S3AutoDeleteObjects, handler
         // `index.handler`). Name-counting would silently miss the unnamed
         // invoices function, so it has to be handler-based now.
+        // 12 -> 13 on 2026-08-05: biztrack-health, the AI-EOS health contract.
         const app = appFunctions();
-        expect(app).toHaveLength(12);
+        expect(app).toHaveLength(13);
 
         const named = app
             .map(fn => fn.Properties?.FunctionName)
@@ -150,6 +151,7 @@ describe('inventory Lambda functions', () => {
             'biztrack-batches',
             'biztrack-clients',
             'biztrack-dashboard',
+            'biztrack-health',
             'biztrack-post-confirmation',
             'biztrack-products',
             'biztrack-purge-accounts',
@@ -159,8 +161,8 @@ describe('inventory Lambda functions', () => {
             'biztrack-whatsapp-scheduler',
             'biztrack-whatsapp-test',
         ]);
-        // 11 named + 1 unnamed (invoices) = 12.
-        expect(named).toHaveLength(11);
+        // 12 named + 1 unnamed (invoices) = 13.
+        expect(named).toHaveLength(12);
     });
 });
 
@@ -204,8 +206,8 @@ describe('Lambda runtime', () => {
         expect(distinct).toHaveLength(1);
     });
 
-    test('all 12 app functions are covered by that check', () => {
-        expect(appRuntimes()).toHaveLength(12);
+    test('all 13 app functions are covered by that check', () => {
+        expect(appRuntimes()).toHaveLength(13);
     });
 });
 
@@ -360,5 +362,91 @@ describe('throttling', () => {
         const paths = methodSettings().map(s => s.ResourcePath);
         expect(paths).not.toContain('/~1invoices~1{id}~1finalize');
         expect(paths).not.toContain('/~1invoices~1{id}~1cancel');
+    });
+});
+
+describe('health endpoint (AI-EOS platform contract §1)', () => {
+    test('/health exists', () => {
+        const resources = template.findResources('AWS::ApiGateway::Resource', {
+            Properties: { PathPart: 'health' },
+        });
+        expect(Object.keys(resources).length).toBe(1);
+    });
+
+    test('GET /health is UNAUTHENTICATED — a token would defeat the endpoint', () => {
+        const resource = Object.entries(template.findResources('AWS::ApiGateway::Resource', {
+            Properties: { PathPart: 'health' },
+        }))[0];
+
+        const get = Object.values(template.findResources('AWS::ApiGateway::Method'))
+            .filter(m => m.Properties.ResourceId?.Ref === resource[0])
+            .filter(m => m.Properties.HttpMethod === 'GET');
+
+        expect(get).toHaveLength(1);
+        expect(get[0].Properties.AuthorizationType).toBe('NONE');
+        expect(get[0].Properties.AuthorizerId).toBeUndefined();
+    });
+
+    test('it is the ONLY unauthenticated GET in the API', () => {
+        // Guards the inverse risk: a future route quietly shipping without the
+        // Cognito authorizer. OPTIONS is the CORS preflight and is always NONE.
+        const open = Object.values(template.findResources('AWS::ApiGateway::Method'))
+            .filter(m => m.Properties.AuthorizationType === 'NONE')
+            .filter(m => m.Properties.HttpMethod !== 'OPTIONS')
+            .map(m => m.Properties.HttpMethod);
+
+        expect(open).toEqual(['GET']);
+    });
+
+    test('runs on its own short-timeout, low-memory function', () => {
+        template.hasResourceProperties('AWS::Lambda::Function', {
+            FunctionName: 'biztrack-health',
+            Handler:      'dist/health.handler',
+            Timeout:      5,
+            MemorySize:   128,
+        });
+    });
+
+    test('HEALTH_TOKEN defaults to empty, so detail cannot leak by default', () => {
+        const fn = Object.values(template.findResources('AWS::Lambda::Function', {
+            Properties: { FunctionName: 'biztrack-health' },
+        }))[0];
+        expect(fn.Properties.Environment.Variables.HEALTH_TOKEN).toBe('');
+    });
+});
+
+describe('CloudFront security headers', () => {
+    test('a response headers policy is attached to the default behavior', () => {
+        const dist = Object.values(template.findResources('AWS::CloudFront::Distribution'))[0];
+        expect(dist.Properties.DistributionConfig.DefaultCacheBehavior.ResponseHeadersPolicyId)
+            .toBeDefined();
+    });
+
+    test('sets HSTS, nosniff, referrer policy and frame denial', () => {
+        template.hasResourceProperties('AWS::CloudFront::ResponseHeadersPolicy', {
+            ResponseHeadersPolicyConfig: Match.objectLike({
+                SecurityHeadersConfig: Match.objectLike({
+                    StrictTransportSecurity: Match.objectLike({
+                        AccessControlMaxAgeSec: 31536000,
+                        IncludeSubdomains:      true,
+                        Preload:                false,
+                        Override:               true,
+                    }),
+                    ContentTypeOptions: { Override: true },
+                    ReferrerPolicy: Match.objectLike({
+                        ReferrerPolicy: 'strict-origin-when-cross-origin',
+                    }),
+                    FrameOptions: Match.objectLike({ FrameOption: 'DENY' }),
+                }),
+            }),
+        });
+    });
+
+    test('no CSP yet — it is deferred deliberately, not forgotten (FU-EOS-3)', () => {
+        const policy = Object.values(
+            template.findResources('AWS::CloudFront::ResponseHeadersPolicy'),
+        )[0];
+        expect(policy.Properties.ResponseHeadersPolicyConfig.SecurityHeadersConfig
+            .ContentSecurityPolicy).toBeUndefined();
     });
 });
