@@ -374,9 +374,12 @@ deploy, then invoke `biztrack-whatsapp-test` to confirm the Graph API call still
 Flagged in passing while touching nearby code. Listed here so they aren't lost; they predate and
 are out of scope of the security/cost pass.
 
-- **Tasks status/priority filter `:prefix` ValidationException** (`lambda/src/tasks.ts` status/
-  priority branch) — seeds an unused `:prefix` value → `GET /tasks?status=…` 500s. (The new
-  calendar range path deliberately avoids this branch.)
+- **~~Tasks status/priority filter `:prefix` ValidationException~~** — RESOLVED 2026-08-05.
+  `listTasks` seeded an unused `:prefix`, so `GET /tasks?status=…` and `?priority=…` 500'd on
+  every filter selection. `filterParts` is now seeded with `begins_with(SK, :prefix)`: the
+  binding is referenced on every path, and filtered queries keep the SK scoping they were
+  silently dropping. Covered by `lambda/src/tasks.test.ts`. **Fixed in source, NOT deployed** —
+  the 500 persists in production until the next `cdk deploy`.
 - **Import "Update" creates duplicates** — `validateClientRow` assigns a fresh UUID per parse and
   bulkAdd always inserts, so a duplicate "Update" row inserts a second record instead of updating.
 - **Cognito callbackURL/logoutURL hardcode + localhost** (`infra/lib/biztrack-stack.ts`) — the

@@ -98,3 +98,64 @@ because it has one user per account (PROJECT.md §8 D-02).
 was deployed, so there is nothing to roll back in AWS.
 
 ---
+
+## [2026-08-05] — Fixed the tasks `:prefix` ValidationException (`GET /tasks` filters)
+
+**Status:** Completed in source. **Not deployed** — the 500 persists in production
+until the next `cdk deploy`.
+
+**What changed and why**
+
+`GET /tasks?status=…` and `?priority=…` returned 500 for every filter selection, and
+had done since the handler was written (`6fe911b`, 2026-05-06). `listTasks` seeded
+`ExpressionAttributeValues` with `:prefix` but referenced it only in the no-filter arm
+of a ternary, so any filtered request left the binding unused — which DynamoDB rejects
+with `ValidationException`. There is no local catch, so it surfaced as a generic 500
+rather than anything diagnosable. The Tasks page sends `status` and `priority` whenever
+either dropdown leaves "All", so every filter in the UI hit it.
+
+`filterParts` is now seeded with `begins_with(SK, :prefix)` rather than using it as the
+no-filter alternative. The binding is referenced on every path and the ternary collapses.
+This also restores SK scoping that filtered queries were silently dropping: GSI2 is
+`(PK, dueDate)` projecting ALL, and only the absence of a `dueDate` attribute on other
+entities was keeping non-task rows out. `listTasks` now matches `listTasksByDateRange`
+in the same file and the GSI2 reads in `dashboard.ts` — one shape for GSI2, not two.
+
+**Files touched**
+- `lambda/src/tasks.ts` — 2 logic lines, plus a comment that described the bug as still open
+- `lambda/src/tasks.test.ts` — new, 3 tests
+- `lambda/vitest.config.ts` — comment only
+- `docs/followups/README.md` — closed the pre-existing-bugs entry
+
+**Edge cases handled** — the unfiltered path is byte-identical: the joined expression is
+the same literal string the `else` arm produced, asserted by test rather than assumed.
+
+**Explicitly NOT handled** — `FilterExpression` applies after `Limit`, so a filtered page
+can return fewer than `pageSize` items alongside a non-null `nextToken`. That is
+pre-existing DynamoDB semantics, unchanged here, and merely observable for the first time
+now that the path returns 200. Also not done: extracting a pure query builder, which is
+the better long-term shape and the one this suite prefers, but is a refactor this fix did
+not require.
+
+**Assumptions / open ambiguities** — none.
+
+**What could break later**
+
+`tasks.test.ts` is the first test in `lambda/` to mock the DynamoDB client. The mock does
+not emulate `ValidationException`, so its `statusCode` assertions are smoke only — the
+assertion of record is the shape of the built expression. `lambda/vitest.config.ts` now
+records when handler mocking is acceptable; pure-function tests remain the preferred shape.
+If that exception starts being used more widely, revisit the pure-builder option above.
+
+**Checks**
+- [x] Tests no worse than before — lambda 255 → 258 pass, root 113 unchanged, infra 41
+      unchanged. No test was weakened or skipped.
+- [x] Tests verified to FAIL on the pre-fix code, then pass after
+- [x] `npm run build` (tsc) clean
+- [x] `npm run lint` still exactly 15 errors + 4 warnings — the FU-EOS-4 baseline, untouched
+- [ ] `./verify.sh` green — still RED for the pre-existing reasons (FU-EOS-4 lint, the
+      not-yet-deployed `/health`). Unchanged by this work.
+
+**Rollback:** revert this commit. Nothing was deployed.
+
+---

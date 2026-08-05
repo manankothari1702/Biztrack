@@ -42,8 +42,8 @@ const listTasks = async (uid: string, event: APIGatewayProxyEvent): Promise<APIG
 
     // NEW (audit B1): calendar date-range mode — GSI2 scoped to a dueDate range. Built by
     // a fully independent function (own KeyCondition / Filter / values, from scratch); it
-    // shares NO expression seed with the status/priority branch below (which retains its
-    // pre-existing orphaned-:prefix bug — out of scope here, flagged separately).
+    // shares NO expression seed with the status/priority branch below. That branch carried
+    // an orphaned :prefix binding until it was fixed to seed filterParts the same way.
     if (q.from || q.to) {
         return await listTasksByDateRange(uid, q);
     }
@@ -58,7 +58,7 @@ const listTasks = async (uid: string, event: APIGatewayProxyEvent): Promise<APIG
         ':prefix': 'TASK#',
     };
 
-    const filterParts: string[] = [];
+    const filterParts: string[] = ['begins_with(SK, :prefix)'];
 
     if (status === 'Overdue') {
         filterParts.push('#status <> :completed');
@@ -79,7 +79,7 @@ const listTasks = async (uid: string, event: APIGatewayProxyEvent): Promise<APIG
         TableName:                 TABLE,
         IndexName:                 'GSI2-TaskStatus',
         KeyConditionExpression:    'PK = :pk',
-        FilterExpression:          filterParts.length ? filterParts.join(' AND ') : 'begins_with(SK, :prefix)',
+        FilterExpression:          filterParts.join(' AND '),
         ExpressionAttributeValues: exprValues,
         ExpressionAttributeNames:  status ? { '#status': 'status' } : undefined,
         Limit:                     pageSize,
