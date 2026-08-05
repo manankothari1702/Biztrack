@@ -159,3 +159,94 @@ If that exception starts being used more widely, revisit the pure-builder option
 **Rollback:** revert this commit. Nothing was deployed.
 
 ---
+
+## [2026-08-05] — Fixed the tasks `Overdue` ValidationException (`GET /tasks?status=Overdue`)
+
+**Status:** Completed in source. **Not deployed** — the 500 persists in production
+until the next `cdk deploy`.
+
+**What changed and why**
+
+`GET /tasks?status=Overdue` still returned 500 after the `:prefix` fix above, while
+`status=Pending`, `priority=High` and the two combined recovered to 200. This is a
+second, independent defect on the same code path, not a regression from that fix:
+`dueDate < :now` has sat in the `FilterExpression` since the handler was written
+(`6fe911b`), and `git show 6e0034d -- lambda/src/tasks.ts` confirms the `:prefix`
+commit touched only the `filterParts` seeding. Overdue carried two validation errors
+stacked; removing the first made the second observable for the first time.
+
+`GSI2-TaskStatus` is `(PK, dueDate)`, so `dueDate` is a key attribute of the index
+being queried, and DynamoDB rejects a key attribute in a `FilterExpression`:
+
+    ValidationException: Filter Expression can only contain non-primary key
+    attributes: Primary key attribute: dueDate
+
+The bound is now applied in the `KeyConditionExpression` instead, which is where a
+sort-key predicate is legal — the same placement `listTasksByDateRange` already uses
+twenty lines below. The predicate was **moved, not deleted**: `:now` stays bound and
+is now referenced by the key condition, so this cannot reintroduce the orphaned-binding
+500 the previous entry fixed. `#status <> :completed` stays in the filter, where it
+belongs. As a side effect the read is now bounded by the index rather than paying for
+rows the filter then discards.
+
+**Files touched**
+- `lambda/src/tasks.ts` — 3 logic lines in `listTasks`, plus a comment
+- `lambda/src/tasks.test.ts` — 6 new tests, no existing line modified
+
+**Edge cases handled** — the four working paths are unchanged *by construction*: the
+assignment sits inside `if (status === 'Overdue')`, so Pending, High and Pending+High
+emit a byte-identical query. Asserted by a parameterised test rather than assumed.
+Tasks with no `dueDate` are absent from the sparse GSI2 before and after, so no task
+appears or disappears. Pagination improves rather than changes: `Limit` previously
+counted rows read before filtering, so Overdue pages arrived under-filled.
+
+**Explicitly NOT handled**
+- `:now` is a full timestamp while `dueDate` is stored as UTC midnight
+  (`dateUtils.ts` `fromInputDate`), so a task due *today* reads as overdue from
+  05:30 IST. `useTasks.ts:70` applies the same comparison client-side but
+  `TaskItem.tsx:93` uses a stricter "past AND not today" rule for the badge. The three
+  disagree. This fix preserves the server's existing semantics exactly rather than
+  changing behaviour inside a 500 fix. **[OWNER TO CONFIRM]** what "overdue" means.
+- The Overdue+High sort at `tasks.ts:96-99` sorts only the current page. Pre-existing.
+- The comment at `tasks.ts:43-46` was left as-is: re-read line by line, every claim in
+  it is still true, and this fix removed the divergence it under-described.
+
+**Assumptions / open ambiguities** — none, beyond the `[OWNER TO CONFIRM]` above.
+
+**What could break later**
+
+The unit tests assert the expression this handler builds, using the same mock that
+missed both defects — the mock does not emulate `ValidationException`, so a green suite
+is not evidence that DynamoDB accepts the query. The assertion of record is therefore
+the CLI reproduction below, not the tests. Note also there is **no development
+environment**: `list-tables` returns only `biztrack`. Every verification call was
+read-only for that reason, and anything stronger than a shape assertion has to be run
+against production with the same care.
+
+**Checks**
+- [x] Reproduced against the real table: the old shape returns the exact CloudWatch
+      `ValidationException`; the new shape, and the new shape plus `priority`, are both
+      accepted. One `--select COUNT` on a real partition returned a genuine overdue task.
+      All calls read-only — `DescribeTable`, and `Query` (no writes, no deploy).
+- [x] Live `DescribeTable` confirms GSI2 range key is `dueDate`, matching `infra.test.ts:80`
+- [x] Tests verified to FAIL on the pre-fix code, then pass after
+- [x] Tests no worse than before — lambda 258 → 264 pass, root 113 unchanged, infra 41
+      unchanged. No test was weakened or skipped.
+- [x] `npm run build` (tsc) clean, frontend and lambda
+- [x] `npm run lint` still exactly 15 errors + 4 warnings — the FU-EOS-4 baseline, untouched.
+      None of the 15 are in either file touched here.
+- [ ] `./verify.sh` green — still RED, for the pre-existing reasons only. Unchanged by
+      this work. Two failures, neither caused here:
+      1. the FU-EOS-4 lint baseline, untouched;
+      2. `health: healthy` is **intermittent**. It reported `degraded` on two of three
+         runs this session and passed on the third. `degraded` means the `DescribeTable`
+         probe exceeded `SLOW_MS` (500ms) in `health.ts:37` — a cold Lambda container
+         exceeds it on the first request even though warm round trips are ~200-280ms.
+         So the release gate is flaky by construction: whether it goes green depends on
+         whether it happens to hit a warm container. Not investigated further and not
+         filed — out of scope for this fix, but it should be, because a gate that fails
+         at random trains people to ignore it. Worth a follow-up.
+
+**Rollback:** revert this commit. Nothing was deployed.
+
+---

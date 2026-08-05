@@ -56,3 +56,42 @@ describe('listTasks — FilterExpression references :prefix on every path', () =
         expect(filter).toContain('priority = :priority');
     });
 });
+
+// Second defect on the same path, masked by the one above until it was fixed: the Overdue
+// branch put `dueDate < :now` in the FilterExpression, but dueDate is GSI2's sort key and
+// DynamoDB rejects a key attribute there ("Filter Expression can only contain non-primary
+// key attributes"). The mock cannot reproduce that validation either; these assert the
+// predicate is in the KeyCondition and that :now did not become an orphaned binding.
+describe('listTasks — status=Overdue bounds dueDate in the KeyCondition', () => {
+    it('status=Overdue', async () => {
+        expect((await handler(event({ status: 'Overdue' }))).statusCode).toBe(200);
+        const input = queryInput();
+
+        expect(input.KeyConditionExpression).toBe('PK = :pk AND dueDate < :now');
+        expect(input.FilterExpression).not.toContain('dueDate');
+
+        // :now must stay referenced — an unreferenced binding is the previous 500.
+        expect(input.ExpressionAttributeValues).toHaveProperty(':now');
+        expect(input.FilterExpression).toContain('begins_with(SK, :prefix)');
+        expect(input.FilterExpression).toContain('#status <> :completed');
+    });
+
+    it('status=Overdue&priority=High keeps priority in the filter', async () => {
+        expect((await handler(event({ status: 'Overdue', priority: 'High' }))).statusCode).toBe(200);
+        const input = queryInput();
+
+        expect(input.KeyConditionExpression).toBe('PK = :pk AND dueDate < :now');
+        expect(input.FilterExpression).toContain('priority = :priority');
+        expect(input.FilterExpression).not.toContain('dueDate');
+    });
+
+    // The other three paths must not have gained a sort-key bound.
+    it.each([[null], [{ status: 'Pending' }], [{ priority: 'High' }], [{ status: 'Pending', priority: 'High' }]])(
+        'non-Overdue path keeps KeyCondition unchanged: %j',
+        async (params) => {
+            expect((await handler(event(params))).statusCode).toBe(200);
+            expect(queryInput().KeyConditionExpression).toBe('PK = :pk');
+            expect(queryInput().ExpressionAttributeValues).not.toHaveProperty(':now');
+        },
+    );
+});

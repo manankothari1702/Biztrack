@@ -59,10 +59,14 @@ const listTasks = async (uid: string, event: APIGatewayProxyEvent): Promise<APIG
     };
 
     const filterParts: string[] = ['begins_with(SK, :prefix)'];
+    let keyCondition = 'PK = :pk';
 
     if (status === 'Overdue') {
         filterParts.push('#status <> :completed');
-        filterParts.push('dueDate < :now');
+        // dueDate is GSI2's sort key, so the bound belongs in the KeyCondition: DynamoDB
+        // rejects a key attribute in a FilterExpression. Same placement as
+        // listTasksByDateRange below. :now stays bound AND referenced.
+        keyCondition = 'PK = :pk AND dueDate < :now';
         exprValues[':completed'] = 'Completed';
         exprValues[':now']       = new Date().toISOString();
     } else if (status) {
@@ -78,7 +82,7 @@ const listTasks = async (uid: string, event: APIGatewayProxyEvent): Promise<APIG
     const result = await db.send(new QueryCommand({
         TableName:                 TABLE,
         IndexName:                 'GSI2-TaskStatus',
-        KeyConditionExpression:    'PK = :pk',
+        KeyConditionExpression:    keyCondition,
         FilterExpression:          filterParts.join(' AND '),
         ExpressionAttributeValues: exprValues,
         ExpressionAttributeNames:  status ? { '#status': 'status' } : undefined,
