@@ -73,9 +73,9 @@ because it has one user per account (PROJECT.md §8 D-02).
   `last_backup_at` rather than reporting `0` and a fabricated timestamp.
 
 **What could break later**
-- `/health` and the security headers are **written but not deployed**. They go live
-  on the next `cdk deploy`. Until then `verify.sh` will report the health check as
-  failing against the deployed stack — correctly.
+- `/health` and the security headers went live with the deploy of 2026-08-05 06:31 UTC.
+  Until then `verify.sh` reported the health check as failing against the deployed
+  stack — correctly.
 - HSTS is now sent with a one-year max-age. It is honoured by browsers for a year
   and cannot be recalled quickly; `preload` was left off for that reason.
 - `infra/test/infra.test.ts` counts Lambda functions. Adding a function fails those
@@ -94,15 +94,16 @@ because it has one user per account (PROJECT.md §8 D-02).
 - [x] `docs/PROJECT.md` updated — §8 carries every deviation
 - [x] `docs/RULES.md` updated — five business rules recorded
 
-**Rollback:** `git reset --hard pre-ai-eos-baseline`, or drop the branch. Nothing
-was deployed, so there is nothing to roll back in AWS.
+**Rollback:** `git reset --hard pre-ai-eos-baseline`, or drop the branch, then
+`cd infra && npx cdk deploy`. It went live 2026-08-05 06:31 UTC, so a git-only
+rollback does not change AWS.
 
 ---
 
 ## [2026-08-05] — Fixed the tasks `:prefix` ValidationException (`GET /tasks` filters)
 
-**Status:** Completed in source. **Not deployed** — the 500 persists in production
-until the next `cdk deploy`.
+**Status:** Completed in source. **Deployed 2026-08-05 07:50 UTC** — the 500 is
+resolved in production.
 
 **What changed and why**
 
@@ -156,14 +157,17 @@ If that exception starts being used more widely, revisit the pure-builder option
 - [ ] `./verify.sh` green — still RED for the pre-existing reasons (FU-EOS-4 lint, the
       not-yet-deployed `/health`). Unchanged by this work.
 
-**Rollback:** revert this commit. Nothing was deployed.
+**Rollback:** revert this commit, then `cd lambda && npm run build` and
+`cd ../infra && npx cdk deploy` — it went live 2026-08-05 07:50 UTC, so a revert
+alone does not change production.
 
 ---
 
 ## [2026-08-05] — Fixed the tasks `Overdue` ValidationException (`GET /tasks?status=Overdue`)
 
-**Status:** Completed in source. **Not deployed** — the 500 persists in production
-until the next `cdk deploy`.
+**Status:** Completed in source. **Deployed 2026-08-05 08:30 UTC** — verified in
+production: `GET /tasks?status=Overdue` returns 200 and the `ValidationException`
+is gone from `/aws/lambda/biztrack-tasks`.
 
 **What changed and why**
 
@@ -247,6 +251,8 @@ against production with the same care.
          filed — out of scope for this fix, but it should be, because a gate that fails
          at random trains people to ignore it. Worth a follow-up.
 
-**Rollback:** revert this commit. Nothing was deployed.
+**Rollback:** revert this commit, then `cd lambda && npm run build` and
+`cd ../infra && npx cdk deploy` — it went live 2026-08-05 08:30 UTC, so a revert
+alone does not change production.
 
 ---
