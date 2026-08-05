@@ -636,8 +636,21 @@ export class BiztrackStack extends cdk.Stack {
         // token cannot be polled by a load balancer or an uptime monitor, which
         // is the entire point of the endpoint. Never add an authorizer here, and
         // never remove this route (PLATFORM.md §1).
-        const healthResource = api.root.addResource('health');
-        healthResource.addMethod('GET', new apigateway.LambdaIntegration(healthLambda));
+        //
+        // GET *and* HEAD, and they are the only unauthenticated methods in the
+        // whole API. API Gateway routes on the exact (resource, method) pair and
+        // does NOT synthesize HEAD from GET the way nginx, Apache and Express do,
+        // so a monitor or load balancer sending HEAD gets 403
+        // MissingAuthenticationToken — an error whose name means "no such route",
+        // not "no credentials". Supporting the verb once beats configuring every
+        // future monitoring tool around the gap. HEAD is safe here for the reason
+        // the endpoint is public in the first place: the handler never inspects
+        // the verb, so HEAD returns the same headers GET does and reveals nothing
+        // extra. One integration serves both methods.
+        const healthResource    = api.root.addResource('health');
+        const healthIntegration = new apigateway.LambdaIntegration(healthLambda);
+        healthResource.addMethod('GET',  healthIntegration);
+        healthResource.addMethod('HEAD', healthIntegration);
 
         // /clients  GET + POST
         const clientsResource = api.root.addResource('clients');

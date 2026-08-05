@@ -373,29 +373,45 @@ describe('health endpoint (AI-EOS platform contract §1)', () => {
         expect(Object.keys(resources).length).toBe(1);
     });
 
-    test('GET /health is UNAUTHENTICATED — a token would defeat the endpoint', () => {
-        const resource = Object.entries(template.findResources('AWS::ApiGateway::Resource', {
+    // HEAD as well as GET: API Gateway routes on the exact (resource, method)
+    // pair and never synthesizes HEAD from GET, so without this a monitor or
+    // load balancer sending HEAD gets a 403 that means "no such route".
+    test.each(['GET', 'HEAD'])(
+        '%s /health is UNAUTHENTICATED — a token would defeat the endpoint',
+        (verb) => {
+            const resource = Object.entries(template.findResources('AWS::ApiGateway::Resource', {
+                Properties: { PathPart: 'health' },
+            }))[0];
+
+            const methods = Object.values(template.findResources('AWS::ApiGateway::Method'))
+                .filter(m => m.Properties.ResourceId?.Ref === resource[0])
+                .filter(m => m.Properties.HttpMethod === verb);
+
+            expect(methods).toHaveLength(1);
+            expect(methods[0].Properties.AuthorizationType).toBe('NONE');
+            expect(methods[0].Properties.AuthorizerId).toBeUndefined();
+        },
+    );
+
+    test('GET and HEAD on /health are the ONLY unauthenticated methods in the API', () => {
+        // Guards the inverse risk: a future route quietly shipping without the
+        // Cognito authorizer. OPTIONS is the CORS preflight and is always NONE.
+        const healthId = Object.keys(template.findResources('AWS::ApiGateway::Resource', {
             Properties: { PathPart: 'health' },
         }))[0];
 
-        const get = Object.values(template.findResources('AWS::ApiGateway::Method'))
-            .filter(m => m.Properties.ResourceId?.Ref === resource[0])
-            .filter(m => m.Properties.HttpMethod === 'GET');
-
-        expect(get).toHaveLength(1);
-        expect(get[0].Properties.AuthorizationType).toBe('NONE');
-        expect(get[0].Properties.AuthorizerId).toBeUndefined();
-    });
-
-    test('it is the ONLY unauthenticated GET in the API', () => {
-        // Guards the inverse risk: a future route quietly shipping without the
-        // Cognito authorizer. OPTIONS is the CORS preflight and is always NONE.
         const open = Object.values(template.findResources('AWS::ApiGateway::Method'))
             .filter(m => m.Properties.AuthorizationType === 'NONE')
-            .filter(m => m.Properties.HttpMethod !== 'OPTIONS')
-            .map(m => m.Properties.HttpMethod);
+            .filter(m => m.Properties.HttpMethod !== 'OPTIONS');
 
-        expect(open).toEqual(['GET']);
+        // Exactly these two verbs, and nothing else, anywhere in the API.
+        // Sorted because resource iteration order is not guaranteed.
+        expect(open.map(m => m.Properties.HttpMethod).sort()).toEqual(['GET', 'HEAD']);
+
+        // ...and BOTH of them on /health. This half is new: the previous version
+        // only checked the verb, so an unauthenticated GET on any other resource
+        // would have passed.
+        for (const m of open) expect(m.Properties.ResourceId.Ref).toBe(healthId);
     });
 
     test('runs on its own short-timeout, low-memory function', () => {
