@@ -256,3 +256,113 @@ against production with the same care.
 alone does not change production.
 
 ---
+
+## [2026-08-05] — WhatsApp credentials moved to Secrets Manager (`7e7a934`), deployed
+
+**Status:** **Deployed 2026-08-05 12:21 UTC.** CloudFormation `UPDATE_COMPLETE`,
+deployment time 57.87s, no rollback and no failed resources. Verified in production.
+
+**What changed and why**
+
+`biztrack-whatsapp-scheduler` had failed 100% of invocations for at least 31 days:
+4,320 errors/day (1,440 EventBridge runs x 3 async retries), every day of the 30-day
+CloudWatch retention window. Nothing alerted, because the account has no alarms at all
+(FU-EOS-6). It was not a broken feature. WhatsApp is intentionally unavailable — the
+Meta Business API credentials have not been purchased — and `GetParameterCommand`
+throws `ParameterNotFound` rather than returning empty, so the `?? ''` fallback on the
+next line was unreachable dead code.
+
+Both consumers now read `biztrack/whatsapp/token` and `biztrack/whatsapp/phone-id`
+from Secrets Manager, per the decision to standardise on it for secrets. Each swallows
+exactly one error, `ResourceNotFoundException`; everything else rethrows.
+
+**Deployed resources** — 14, all modify, no creates, deletes or replacements:
+- 1 `AWS::IAM::Policy` — `ssm:GetParameter`/`GetParameters` on `parameter/biztrack/*`
+  replaced by `secretsmanager:GetSecretValue` on `secret:biztrack/*`
+- 13 `AWS::Lambda::Function` — shared asset, code hash `I3okSeBm…` to
+  `VbLLByGTQOE7/2bsR0KFnja6a91ZTriUTVOVuZr09sg=`, all `Active`/`Successful`
+
+**Production results — before vs after** (`biztrack-whatsapp-scheduler`)
+
+| Metric | Before (24h to 12:12 UTC) | After (11.1 min from 12:23 UTC) |
+|---|---|---|
+| Errors | 4,320 (100% failure) | **0** |
+| Invocations | 4,320 (~3/min) | 12 (~1.08/min) |
+| Throttles | 0 | 0 |
+| Duration avg | 34.64 ms | 130.86 ms |
+| ConcurrentExecutions max | 2 | 1 |
+
+Invocations fell to roughly one per scheduled minute because the 3x async retry only
+existed while invocations were failing. Duration rose because the function now
+completes two Secrets Manager round trips before returning, where before it died at
+the first SSM call; the sample also includes cold starts from 13 replaced containers.
+That is expected, not a regression. Account-wide Lambda `Errors` since deploy: 0.
+
+**Runtime verified in production**
+- Scheduler logs contain only `START`/`END`/`REPORT`. Zero matches for `ERROR`,
+  `Invoke Error`, `Exception` or `ResourceNotFound`. The silent no-op works.
+- `whatsappTest` returns `400 {"error":"WhatsApp is not configured."}`.
+- Live IAM on the execution role grants exactly one credential action,
+  `secretsmanager:GetSecretValue` on `secret:biztrack/*`. Zero statements granting
+  `ssm:` remain. Zero `AccessDenied` events in either WhatsApp log group.
+- No secrets exposed: env vars are `ALLOWED_ORIGINS`, `TABLE_NAME` and
+  `AWS_NODEJS_CONNECTION_REUSE_ENABLED` only; zero `Bearer` occurrences in logs; the
+  400 body carries no credential material.
+- Both secrets confirmed absent, so this is the unconfigured path, not activation.
+- Cross-project isolation: this account also holds `jsg-directory/*` secrets for
+  another app. All three evaluate `implicitDeny` under the new grant. A `secret:*`
+  wildcard would have granted read access to another project's DB master password.
+- No regression in the other 11 functions: `GET /tasks`, `?status=Pending` and
+  `?status=Overdue` all 200; `/health` healthy when warm; auth boundaries 401; HSTS,
+  `X-Content-Type-Options` and `Referrer-Policy` all present.
+
+**Explicitly NOT verified**
+- **Automatic activation when the secrets are created was not observed.** Creating a
+  real secret would arm live WhatsApp messaging, which is out of scope for a deploy
+  check. What is proven is the mechanism: IAM authorises the bare-name ARN, so a
+  created secret resolves rather than returning `AccessDenied`.
+- The post-deploy observation window is 11.1 minutes. The error result needs no
+  extrapolation — the baseline failed every single invocation, so 12 consecutive
+  clean runs is categorical — but the daily invocation rate should not be read
+  precisely off a window this short.
+
+**Known debt, unchanged by this deploy**
+- `getSecret` is duplicated verbatim in both handlers. Extracting it would be a
+  wrapper around one SDK call, which `AGENTS.md` rules out.
+- `whatsappTest` reserves a rate-limit slot before discovering the feature is
+  unconfigured, so a user burns one of ten daily sends for a 400.
+- `AGENTS.md` forbids calling `get-secret-value` and mandates
+  `{{resolve:secretsmanager:...}}` with `asm-exec`. That is a deploy-time
+  CloudFormation reference: it fails the deploy when the secret is absent, so it
+  cannot express "absent means off", and it would place credentials in plaintext
+  Lambda env vars. `asm-exec` is a container pattern; this app is serverless
+  (`PROJECT.md` §8 D-05). This needs an ADR.
+- Two orphaned `/biztrack/google/*` SSM parameters remain in the account, read by
+  nothing in this codebase.
+- `/health` reported `degraded` on the first post-deploy request (1.66s) then healthy
+  when warm. Pre-existing `SLOW_MS` cold-start threshold in `health.ts:37`, unchanged.
+
+**Test artifact** — verifying `whatsappTest` required an invocation, and that endpoint
+reserves a rate-limit slot before the config check, so a synthetic uid
+(`verify-deploy-synthetic-uid`) was used rather than the owner's, leaving the real
+quota untouched. It wrote one row carrying `expiresAt` 2026-08-07 12:24:07 UTC; the
+table has TTL enabled on that attribute, so it deletes itself. No manual cleanup.
+
+**Checks**
+- [x] CloudFormation `UPDATE_COMPLETE`, no rollback, no failed resources
+- [x] All 13 Lambdas on the new code hash, `Active`/`Successful`
+- [x] Live IAM policy verified least privilege; SSM grant gone
+- [x] Scheduler errors 4,320/day to 0; account-wide Lambda errors 0
+- [x] `whatsappTest` returns 400; no secrets in logs, env vars or responses
+- [x] 418 tests pass (lambda 264, root 113, infra 41)
+- [ ] `./verify.sh` green — still RED on the FU-EOS-4 lint baseline (15 errors, 4
+      warnings), none in any file in this commit. Unchanged by this work.
+
+**Rollback:** `git revert 7e7a934`, then `cd lambda && npm run build` and
+`cd ../infra && npx cdk deploy`. It is live, so a revert alone does not change
+production. Code and IAM revert together in one changeset, so there is never a window
+where the grant and the code disagree. Rolling back restores the SSM grant and both
+SSM readers, returning the scheduler to ~4,320 errors/day — the previous status quo,
+not an outage.
+
+---
