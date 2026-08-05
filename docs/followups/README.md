@@ -88,6 +88,76 @@ so toggling reports on from a fresh profile 400s with a generic toast.
 
 ---
 
+## Group EOS — opened by the AI-EOS adoption, 2026-08-05
+
+Adoption was scoped to categories 1–3 (documentation, tooling, observability) and
+stopped there deliberately. These are the items it surfaced but did not do. Full
+context: `docs/PROJECT.md` §8 and the adoption entry in `docs/LOG.md`.
+
+### FU-EOS-1 · Hard delete of business records  → PROJECT.md §8 D-01 · 🔴 P1
+**The company standard says soft delete only; this app deletes for real.** There is no
+`is_deleted` flag and no undo — a mis-clicked delete is permanent data loss for the
+owner's own CRM.
+
+Call sites: [`lambda/src/clients.ts:258`](../../lambda/src/clients.ts#L258) ·
+[`lambda/src/products.ts:322`](../../lambda/src/products.ts#L322) ·
+[`lambda/src/tasks.ts:186`](../../lambda/src/tasks.ts#L186).
+Finalized invoices are already safe — they are part of the audit trail and only
+drafts can be deleted (BR-BIZ-005).
+
+**Why it was not done during adoption:** retrofitting `is_deleted` touches every read,
+query, count, export and dashboard aggregate in the app — a feature-sized change, and
+`MIGRATION.md` is explicit that adoption is not where that belongs. **This is a
+deferral, not an approval.**
+
+Do it one entity at a time, not one commit. Suggested order: clients (highest value,
+most painful to lose), then products, then tasks. Each entity needs: the flag on
+write, `is_deleted = false` on every read path **including totals and Excel exports**,
+and a test that a deleted record is genuinely hidden from a list, a count and an
+export. The dashboard aggregates are the easiest place to get this wrong.
+
+### FU-EOS-2 · A DynamoDB restore has never been tested  → PROJECT.md §10 · 🔴 P1
+PITR is enabled and the table is `RETAIN`, so the backup side is sound. Nobody has ever
+restored from it. **An unrestored backup is a file, not a safety net** — the failure
+mode is discovering at the worst possible moment that the restore path has a step
+nobody knows.
+
+Owner action, roughly an hour: restore the table to a new name at a timestamp a few
+minutes old, point nothing at it, confirm a handful of known rows are present, then
+delete the restored table. Record the date in `docs/PROJECT.md` §10 — the field is
+deliberately marked 🔴 NEVER until this happens.
+
+### FU-EOS-3 · No Content-Security-Policy  → PROJECT.md §8 D-05 · 🟡 P2
+The AI-EOS adoption added HSTS, `X-Content-Type-Options`, a referrer policy and
+`X-Frame-Options` to the CloudFront distribution, which previously set **no security
+headers at all**. CSP was deliberately left out: a wrong CSP breaks a live SPA
+silently — a blank page whose only clue is in the browser console.
+
+Do it in the safe order: ship `Content-Security-Policy-Report-Only` with a report
+endpoint, watch real traffic for a week (Cognito Hosted UI redirects and the FontAwesome
+/ ExcelJS bundles are the likely violations), then promote to enforcing. `verify.sh`
+already checks for the header and currently skips it with this reason.
+
+### FU-EOS-4 · `npm run lint` is red — 15 errors  → 🟡 P2
+Pre-existing, recorded in the adoption baseline (commit `c94fd0e`), **not** introduced
+by adoption. Unused `catch` bindings in `dateUtils.ts`, three `no-explicit-any` in
+`excelUtils.ts`, and a `react-hooks/immutability` error in the data context.
+
+This is the one blocking the pre-commit hook: `.githooks/pre-commit` exists but is
+deliberately **not enabled**, because turning it on while `verify.sh --fast` is red
+would block every commit and teach everyone to reach for `--no-verify`. Fix the 15
+errors, then run `git config core.hooksPath .githooks` and the gate becomes automatic.
+
+### FU-EOS-5 · Stale artefacts still tracked in git  → 🟢 P3
+`.gitignore` now ignores them, but these were already committed and remain in the repo:
+`lint_report.json` (587 KB), `lint_log.txt`, `lint_output.txt`, `output.txt`,
+`repro_bug.ts`, `.firebase/hosting.ZGlzdA.cache` (left over from the pre-AWS backend),
+and two `.docx` interview files. Adoption did **not** delete them — removing files is
+the owner's call, not a side effect of a standards pass. `git rm --cached` whichever
+are genuinely dead.
+
+---
+
 ## Group B — deferred backlog (feature/infra work, not gating correctness)
 
 ### FU-B1 · Enable Phase C reserved concurrency  → item 3 (B4)
