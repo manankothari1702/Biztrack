@@ -28,3 +28,21 @@ dist-ssr
 .env.local
 .env.*.local
 .gstack/
+
+# CDK synth output — ~31 MB of bundled node_modules per synth.
+# Also covered by infra/.gitignore; repeated here so it is visible from the root.
+infra/cdk.out/
+.cdk.staging/
+
+# Lint and debug artefacts — regenerated on demand, never reviewed
+lint_report.json
+lint_log.txt
+lint_output.txt
+clients_lint.txt
+output.txt
+firebase-debug.log
+firestore-debug.log
+
+# Firebase hosting cache — left over from the pre-AWS backend.
+# NOTE: .firebase/hosting.ZGlzdA.cache is still tracked from that era.
+.firebase/
