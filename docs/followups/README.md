@@ -156,6 +156,33 @@ and two `.docx` interview files. Adoption did **not** delete them — removing f
 the owner's call, not a side effect of a standards pass. `git rm --cached` whichever
 are genuinely dead.
 
+### FU-EOS-6 · ~~No monitoring or alerting of any kind~~ — RESOLVED 2026-08-05
+
+**Done and deployed** (`8a0b5d1`, deployed 13:23 UTC; write-up in `docs/LOG.md`).
+
+The account had **zero alarms, zero SNS topics and zero dashboards**. That is how
+`biztrack-whatsapp-scheduler` failed 4,320 times a day for at least 31 days with
+nobody knowing, and how the tasks `:prefix` bug 500'd every filtered query until a
+human read the code.
+
+Now live: five alarms on `biztrack-alerts` (API 5XX, account-wide Lambda errors,
+account-wide Lambda throttles, DynamoDB throttle events, and the daily purge going
+silent), one dashboard, and a `verify.sh` guard that fails while the alert topic has
+no **confirmed** subscriber. ~$0.60/month. Rules recorded as `BR-BIZ-E05` and
+`BR-BIZ-E06` in `docs/RULES.md`.
+
+Owner actions completed 2026-08-05: SNS subscription confirmed, AWS billing alerts
+enabled (`AWS/Billing` now publishes, including the `Currency`-only series the
+dashboard widget queries), and an external uptime monitor configured against
+`HealthUrl` — Decision B1, the independent check no in-account alarm can provide.
+
+**Two things here will go stale silently, so they are written down rather than
+trusted to memory** (both also in `BR-BIZ-E06`):
+- Thresholds of `1` are right at ~4,300 invocations/day. **Past ~50,000/day** they
+  become noise; replace with per-function alarms plus an error-*rate* alarm.
+- The dashboard's red line at **concurrency 10** must move when **FU-0** raises the
+  quota, or it is a lie drawn on a graph.
+
 ---
 
 ## Group B — deferred backlog (feature/infra work, not gating correctness)
