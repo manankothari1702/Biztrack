@@ -9,14 +9,19 @@ Biztrack is a comprehensive business management dashboard designed for independe
 - **Team Visualization:** Dynamic, zoomable Organization Tree to easily manage and visualize your downline/team structure.
 - **Calendar & Scheduling:** Integrated calendar view to manage upcoming client calls and deadlines.
 - **Dashboard Overview:** Real-time metric cards for calls due, active tasks, and recent activity to keep you focused.
-- **Data Privacy & Security:** Secure authentication and data isolation per user using Firebase.
+- **Inventory & Invoicing:** Batch-tracked stock by expiry date, with sales and purchase invoices.
+- **Data Privacy & Security:** Cognito authentication; every record is partitioned by the signed-in user's ID, taken from the verified token.
 
 ## 🛠 Tech Stack
 
 - **Frontend:** React 19, Vite, TypeScript
 - **Styling:** Tailwind CSS
 - **Routing:** React Router DOM
-- **Backend/Database:** Firebase (Authentication, Firestore)
+- **Auth:** AWS Cognito (user pool + hosted UI)
+- **API:** API Gateway (REST) + AWS Lambda (Node 24)
+- **Database:** DynamoDB, single-table design
+- **Hosting:** S3 + CloudFront
+- **Infrastructure:** AWS CDK (`infra/`), region `ap-south-1`
 - **Icons:** FontAwesome
 
 ## 💻 Getting Started
@@ -157,9 +162,20 @@ npm run preview
 
 ## 📂 Project Structure
 
-- `src/components/`: Reusable UI components.
-- `src/pages/`: Main application pages and views.
-- `src/context/`: React context providers for global state management (Auth, Data).
-- `src/hooks/`: Custom React hooks.
-- `src/lib/`: Utility functions and Firebase configuration.
-- `src/types/`: TypeScript type definitions.
+- `src/features/<feature>/`: Each feature owns its `pages/`, `components/` and `hooks/`
+  (auth, calendar, clients, dashboard, inventory, profile, tasks, team).
+- `src/shared/`: Cross-feature code — `components/`, `context/`, `services/` (API client),
+  `utils/`, `types/`, `constants/`.
+- `lambda/src/`: API handlers, one file per resource, with shared helpers in `lambda/src/lib/`.
+- `infra/`: AWS CDK app defining the whole stack.
+- `docs/`: `PROJECT.md` (how it works and why), `RULES.md` (business rules), `LOG.md`
+  (change history), plus `specs/` and `followups/`.
+
+## 📐 Engineering standard
+
+This project follows the company AI Engineering Operating System, vendored at
+`.ai-eos/` and imported by `AGENTS.md` at the root. Start at
+[`docs/PROJECT.md`](docs/PROJECT.md) — §8 records where this app deliberately
+deviates from the standard, and why.
+
+Before deploying, run `./verify.sh`.

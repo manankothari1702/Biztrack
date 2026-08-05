@@ -41,19 +41,20 @@ Biztrack is a comprehensive business management application designed to help use
 -   **Routing:** Utilizes **React Router** for seamless navigation between different modules (Dashboard, Clients, Tasks, etc.).
 
 ### 3.2 Data Management (Backend)
--   **Firebase Firestore:** The application uses Google's Firebase Firestore as a real-time, cloud-hosted NoSQL database.
--   **Data Context:** A robust `DataContext` in the frontend manages all data interactions. It sets up real-time listeners (`onSnapshot`) to automatically sync data revisions between the local application and the cloud.
--   **Offline Capabilities:** The architecture supports basic offline data handling through local state, syncing when the connection is restored.
+-   **DynamoDB:** A single DynamoDB table in `ap-south-1` holds all business data, using a single-table design. Every item is partitioned by `PK = USER#<uid>`, where `uid` comes from the verified Cognito token — that partition key is the tenancy boundary.
+-   **API:** API Gateway (REST) fronts one Lambda per resource (clients, tasks, products, batches, invoices, …), each behind a Cognito user-pool authorizer.
+-   **Data Context:** A `DataContext` in the frontend manages data interactions and caching. Data is fetched over HTTP, not streamed — there are no real-time listeners.
 
 ### 3.3 User Workflow
-1.  **Onboarding:** The user signs up and is authenticated via Firebase Auth.
+1.  **Onboarding:** The user signs up and is authenticated via AWS Cognito. A PostConfirmation Lambda trigger creates their profile record.
 2.  **Setup:** The user initializes their data (clients, team members).
 3.  **Daily Use:** The user logs in to the Dashboard to check tasks and schedules. They navigate to the Clients page to manage customer interactions or the Team page to adjust organizational structures.
-4.  **Syncing:** Any change made (e.g., adding a client) is immediately sent to Firestore and propagated to any other open sessions.
+4.  **Syncing:** Any change made (e.g., adding a client) is written to DynamoDB through the API. Other open sessions pick it up on their next fetch, not instantly.
 
 ## 4. Setup & Deployment (Developer Guide)
--   **Dependencies:** Managed via `npm` (React, Firebase SDK, Tailwind, etc.).
+-   **Dependencies:** Managed via `npm` (React, AWS Amplify auth, Tailwind, ExcelJS, etc.).
 -   **Scripting:**
     -   `npm run dev`: Starts the local development server.
     -   `npm run build`: Compiles the application for production.
--   **Deployment:** Configured for deployment on platforms like Firebase Hosting.
+-   **Deployment:** `cd lambda && npm run build`, then `cd infra && npx cdk deploy`. The frontend is built to `dist/` and served from S3 behind CloudFront; the API and all AWS resources are defined in CDK.
+-   **Standard:** This project follows the company AI Engineering Operating System (`.ai-eos/`). See `docs/PROJECT.md` for identity, algorithms and deliberate deviations.
