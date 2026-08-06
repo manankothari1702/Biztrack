@@ -607,3 +607,133 @@ method and its two permissions and redeploys the stage. The monitor would return
 reporting DOWN unless switched to GET first.
 
 ---
+
+## [2026-08-06] — Health gate retries once on `degraded`, not deployed
+
+**Status:** Implemented and verified locally. **Nothing was deployed and nothing in
+production changed** — this entry covers `verify.sh` only, which is a build-time
+script. `/health`, the Lambda, the CDK stack and every latency threshold are
+untouched, deliberately.
+
+**The symptom.** `./verify.sh` reported `health: degraded` at random while production
+was fine, and **always** on the first run after a deploy. Recorded but not
+investigated in the tasks-filter entry above: *"it reported degraded on two of three
+runs this session"*, and again after the Secrets Manager deploy: *"degraded on the
+first post-deploy request (1.66s) then healthy when warm"*. A gate that fails at
+random trains people to ignore it, so it was finally measured.
+
+**The cause is connection state, not the database.** Measured 2026-08-06 via CloudWatch
+Logs Insights on `@duration` and `@initDuration`, over every health invocation since
+the endpoint shipped (2026-08-05 06:32 UTC — the complete population, not a sample).
+Two pulls minutes apart returned **309** and **322** rows; the extra 13 are a 10-request
+diagnostic burst made during the investigation plus monitor polls, and they are
+excluded from the sub-60s row below so the finding does not rest on self-generated
+traffic:
+
+| Population | n | p50 | max | over `SLOW_MS` (500ms) |
+|---|---|---|---|---|
+| Cold container | 68 | 906ms | 1041ms | **68 (100%)** |
+| Warm, >1min since last request | 204 | 266ms | 800ms | 67 (33%) |
+| Warm, <60s since last request | 41 | **66ms** | **449ms** | **0 (0%)** |
+
+(41 excludes the diagnostic burst; including it the row is 50 samples, still 0 over
+threshold. The percentages below are from the 309-row pull, taken before the burst.)
+
+`t0` in [`health.ts:42`](../lambda/src/health.ts#L42) opens **before** the first
+`ddb.send()`, so the measured window contains TLS handshake, credential and endpoint
+resolution — connection setup, not `DescribeTable` latency. The distribution is
+bimodal: ~66ms on a hot connection, ~906ms on a new one. `SLOW_MS = 500` sits between
+the two modes, so **43% of honest samples (133/309) classified as `degraded`** while
+the table was `ACTIVE` throughout. `cdk deploy` replaces every container, so the first
+probe after a deploy is cold by construction and failed the gate **100%** of the time.
+
+The six invocations measured directly after a cold one ran **44-70ms**. That is why a
+single retry is sufficient and why it filters the artefact and nothing else: the
+slowness is a first-request-over-a-new-connection property, and a retry is by
+definition a second request. A genuinely slow database is not a first-request
+property, so it is still slow two seconds later and still fails.
+
+**What changed** — `verify.sh`, health block only:
+
+- **One retry, only on `degraded`,** after 2s. `healthy` passes without a second
+  request; `unhealthy` fails immediately and is **never** retried, because a down
+  database does not recover in two seconds and pretending it might is how a gate
+  starts lying. A pass that needed the retry says so in its message.
+- **`curl -f` dropped.** It discards the body on any status >= 400, so a genuine 503
+  `unhealthy` arrived as an empty string and was reported as "no valid response".
+  Status, body and curl's exit code are now kept apart, and `healthy` / `degraded` /
+  `unhealthy` / unreachable are four distinct messages instead of three.
+- **`health detail auth-gated` now fails closed.** The old form was
+  `grep -q '"version"' && fail || pass`; an empty body made the grep fail and fell
+  through to `pass`, so any curl failure silently turned a security check into a green
+  tick. Verified against the old logic: it did.
+
+**Decided against, so it is not re-litigated** (full analysis in the review that
+produced this change):
+
+- **Changing `/health` instead.** A single instantaneous measurement cannot tell a
+  transient artefact from a persistent condition; that needs more than one
+  observation, and only a caller can make more than one. The endpoint also has other
+  consumers — the external uptime monitor, and the fleet contract in `AGENTS.md` —
+  and changing it to suit one build script is the wrong blast radius.
+- **Moving `SLOW_MS` 500 -> 1000.** No longer needed once the gate retries, and ~29
+  hours of data is not enough to permanently redefine a production threshold. The
+  deeper point is that **one threshold cannot classify a bimodal distribution**;
+  picking a different single number is a different way to be wrong. Left for an
+  evidence-driven follow-up after a larger observation window.
+- **Two retries.** One is simpler and bounds the residual at ~7% (rule of three on
+  0 failures in 41 samples), observed 0%. Expand only if production evidence justifies it.
+
+**Verification** — 14 scenarios against a scripted local server plus the real
+production endpoint. Request counts are read server-side, so "no retry" is proven by
+the server never seeing a second request, not inferred from output.
+
+| Scenario | Requests | Result |
+|---|---|---|
+| `healthy` | 1 | GREEN, immediate |
+| `unhealthy` (503) | **1** | RED, not retried |
+| `degraded` -> `healthy` | 2 | GREEN, retry noted in the message |
+| `degraded` -> `degraded` | 2 | RED |
+| `degraded` -> `unhealthy` | 2 | RED |
+| empty body, HTTP 200 | 1 | RED, and auth-gate **fails closed** |
+| HTTP 502 / non-JSON 200 | 1 | RED, "unrecognised response" with the code |
+| body leaks `version` | 1 | health passes, auth-gate RED |
+| whitespace in JSON | 1 | GREEN, parses correctly |
+| connection refused | 0 | RED, "unreachable (curl exit 7)", auth-gate fails closed |
+| no API URL / no curl | 0 | both skip |
+| **real production endpoint** | 1 | GREEN in 1s, no retry |
+
+A healthy run costs nothing extra. Only a degraded first probe pays the 2s.
+
+**Checks**
+- [x] `verify.sh` is the only file changed besides this entry. No Lambda, no CDK, no
+      AWS resource, no threshold, no deploy
+- [x] `bash -n verify.sh` clean (`shellcheck` is not installed on this machine, so that
+      lint was **skipped, not passed**)
+- [x] 433 tests pass, unchanged: lambda 264, root 113, infra 56
+- [x] `npm run lint` still exactly 15 errors + 4 warnings — the FU-EOS-4 baseline,
+      untouched, none in this change
+- [x] Full `./verify.sh` run end to end against real AWS: `health: healthy` and
+      `health detail auth-gated` both green
+- [ ] `./verify.sh` green — still RED on **one** item, the FU-EOS-4 lint baseline.
+      Unchanged by this work
+- [ ] Post-deploy behaviour observed in the wild — the point of the change is the run
+      immediately after `cdk deploy`, and no deploy has happened since. **The first
+      real proof is the next deploy.**
+
+**Known limitation, accepted.** When the first probe is `degraded` and the retry
+returns `unhealthy`, the failure message still reads "Not retried, by design". The
+verdict and the reason are correct; only the aside is imprecise, in a case that
+requires the database to fail between two probes 2s apart. Not worth a branch.
+
+**Follow-up opened, deliberately not done here:** `core.autocrlf=true` with no
+`.gitattributes` means a fresh clone on Windows checks `verify.sh` out with CRLF, and
+`#!/usr/bin/env bash` then fails to execute. The blob in git is LF and the current
+working copy is LF, so nothing is broken today. Pre-existing, repo-wide, and it makes
+the release gate unrunnable on a fresh clone. A one-line `.gitattributes`
+(`*.sh text eol=lf`) fixes it.
+
+**Rollback:** revert this commit. Build-time only — there is nothing deployed to undo,
+and production is byte-identical either way.
+
+---

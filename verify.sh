@@ -175,17 +175,70 @@ if [ -z "$API" ] || [ "$API" = "/api" ]; then
 elif ! have curl; then
   skip "health: healthy" "curl not available"
 else
-  H=$(curl -fsS --max-time 5 "${API%/}/health" 2>/dev/null)
-  if echo "$H" | grep -q '"healthy"'; then
-    pass "health: healthy"
-  elif echo "$H" | grep -q '"degraded"'; then
-    fail "health: healthy" "reports degraded - check the database probe"
-  else
-    fail "health: healthy" "no valid response from ${API%/}/health"
+  # `-f` is deliberately NOT used. It discards the body on any status >= 400,
+  # which turned a genuine 503 "unhealthy" into "no valid response" and left the
+  # auth-gate check below inspecting an empty string. Status, body and curl's own
+  # exit code are kept apart so the four outcomes stay distinguishable.
+  HTTP=''; BODY=''; RC=0; STATUS=''; RETRIED=0
+  probe_health() {
+    local out
+    out=$(curl -sS --max-time 5 -w '\n%{http_code}' "${API%/}/health" 2>/dev/null); RC=$?
+    HTTP=$(printf '%s' "$out" | tail -n1)
+    BODY=$(printf '%s' "$out" | sed '$d')
+    STATUS=$(printf '%s' "$BODY" \
+      | sed -n 's/.*"status"[[:space:]]*:[[:space:]]*"\(healthy\|degraded\|unhealthy\)".*/\1/p')
+  }
+
+  probe_health
+
+  # ONE retry, and ONLY on `degraded`. Measured 2026-08-06 over all 309 health
+  # invocations since the endpoint shipped: `degraded` means the DescribeTable
+  # probe passed SLOW_MS (health.ts:37), and that is dominated by establishing
+  # the connection, not by the database. Every cold invocation crossed it
+  # (68/68, min 830ms); a warm one that follows a request within 60s never did
+  # (0/41, max 449ms); the six retries measured directly after a cold one ran
+  # 44-70ms. `cdk deploy` replaces every container, so the first probe after a
+  # deploy is cold by construction and was failing the gate 100% of the time.
+  #
+  # The retry filters that artefact and nothing else: a genuinely slow database
+  # is not a first-request property, so it is still slow 2s later and still
+  # fails. `unhealthy` is never retried - a down database does not recover in
+  # two seconds, and pretending it might is how a gate starts lying.
+  if [ "$STATUS" = 'degraded' ]; then
+    sleep 2
+    probe_health
+    RETRIED=1
   fi
-  echo "$H" | grep -q '"version"' \
-    && fail "health detail auth-gated" "unauthenticated response includes version - auth-gate it" \
-    || pass "health detail auth-gated"
+
+  case "$STATUS" in
+    healthy)
+      [ "$RETRIED" -eq 1 ] \
+        && pass "health: healthy (first probe degraded, healthy 2s later - new-connection latency, not a fault)" \
+        || pass "health: healthy" ;;
+    degraded)
+      fail "health: healthy" \
+           "degraded on TWO consecutive probes 2s apart - a cold start cannot survive a retry, so this is a real slow DescribeTable, not a deploy artefact" ;;
+    unhealthy)
+      fail "health: healthy" \
+           "reports unhealthy (HTTP ${HTTP}) - the database probe failed or the table is not ACTIVE. Not retried, by design" ;;
+    *)
+      if [ "$RC" -ne 0 ] || [ -z "$HTTP" ] || [ "$HTTP" = '000' ]; then
+        fail "health: healthy" "unreachable - ${API%/}/health did not answer (curl exit ${RC})"
+      else
+        fail "health: healthy" "unrecognised response from ${API%/}/health (HTTP ${HTTP}): ${BODY:-<empty body>}"
+      fi ;;
+  esac
+
+  # Fails CLOSED. Previously an empty body made the `grep` fail and fell through
+  # to `pass`, so any curl failure silently turned a security check into a green
+  # tick. No body is not evidence of auth-gating.
+  if [ -z "$BODY" ]; then
+    fail "health detail auth-gated" "no body to inspect - cannot prove the unauthenticated response is gated"
+  elif printf '%s' "$BODY" | grep -q '"version"'; then
+    fail "health detail auth-gated" "unauthenticated response includes version - auth-gate it"
+  else
+    pass "health detail auth-gated"
+  fi
 fi
 
 # --- security headers -------------------------------------------------------
