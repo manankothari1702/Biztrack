@@ -33,7 +33,7 @@ export const DatePicker: React.FC<DatePickerProps> = ({ value, onChange, classNa
         if ('showPicker' in input) {
             try {
                 (input as any).showPicker();
-            } catch (error) {
+            } catch {
                 // Fallback or ignore if blocked by browser
             }
         }
