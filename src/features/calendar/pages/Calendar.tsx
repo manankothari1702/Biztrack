@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useCallback } from 'react';
 import { useCalendarData } from '../hooks/useCalendarData';
 import { useAuth } from '../../auth/context/AuthContext';
 import { tasksApi, clientsApi } from '../../../shared/services/apiService';
@@ -53,7 +53,10 @@ const Calendar: React.FC = () => {
         setViewYear(prev => prev + offset);
     };
 
-    const getItemsForDay = (day: number) => {
+    // useCallback so the renderDays memo below can depend on it. Its identity
+    // changes exactly when tasks, clients, year or month change - the same four
+    // values that memo used to list directly - so nothing recomputes more often.
+    const getItemsForDay = useCallback((day: number) => {
         const dateStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
         // tasks and clients are already filtered by Date Range in the hook,
         // but we still need to filter for the specific day *within* that loaded month.
@@ -66,7 +69,7 @@ const Calendar: React.FC = () => {
             calls: allDayCalls,
             total: dayTasks.length + allDayCalls.length
         };
-    };
+    }, [tasks, clients, year, month]);
 
     const handleRescheduleTask = async (task: Task, newDate: string) => {
         if (!currentUser) return;
@@ -169,7 +172,7 @@ const Calendar: React.FC = () => {
         }
 
         return cells;
-    }, [currentDate, tasks, clients, firstDay, daysInMonth, year, month, loading]);
+    }, [currentDate, firstDay, daysInMonth, loading, getItemsForDay]);
 
     // Month Selector Component
     const renderMonthSelector = () => {
