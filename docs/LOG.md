@@ -874,7 +874,7 @@ disable the hook: `git config --unset core.hooksPath`.
 
 ---
 
-## [2026-08-06] — Lambda concurrency: quota 10 → 1000, reserved concurrency enabled (FU-0), not deployed
+## [2026-08-06] — Lambda concurrency: quota 10 → 1000, reserved concurrency enabled (FU-0) (`f07d204`), deployed
 
 **The whole app shared ten concurrency slots.** Account `346299179287` / ap-south-1 sat
 at `ConcurrentExecutions = 10` — the AWS new-account floor — and all fourteen functions
@@ -961,12 +961,35 @@ which hits signup first. The description is the runbook somebody reads at 3am.
       changes**, zero deletions
 - [x] Rollback path (`cdk synth` without the flag) emits **0** reservations
 
-**Not verified, and worth being straight about.** Nothing is deployed. Every figure
-above comes from the synthesized template and a read-only change set, not from a live
-stack. The reservations have never been exercised under real concurrency — measured
-peaks are 1–4 per function against reservations of 5–60, so the *sizing* is untested in
-the only way that would matter, which is load. The first real test will be production
-traffic.
+**Deployed 2026-08-06 18:18 UTC (23:48 IST), `UPDATE_COMPLETE` in 21.9s.** Eighteen
+CloudFormation events, no failures, no rollback, no resource replaced.
+
+Verified live, against AWS rather than the template:
+
+- [x] Twelve functions carry their intended reservation; `biztrack-post-confirmation`
+      and the CDK S3 helper carry none
+- [x] `health` = 5, `whatsapp-scheduler` = 5
+- [x] **Reserved sums to 267**, and `get-account-settings` independently reports
+      **`UnreservedConcurrentExecutions: 733`** against `ConcurrentExecutions: 1000` —
+      the two agree, so nothing is reserved that this stack does not know about
+- [x] Stage 100/200; `/dashboard` 20/40; `/clients/bulk` POST+DELETE, `/products/bulk`
+      POST and `/invoices` POST all 5/10
+- [x] All five alarms `OK`
+- [x] `/health` returns `{"status":"healthy"}` on **GET (200, 352ms)** and **HEAD (200,
+      211ms)**
+- [x] `./verify.sh` GREEN end to end, including the live deployed-stack checks
+- [x] 25 minutes post-deploy: **zero throttles, zero Lambda errors** account-wide, and
+      the scheduler ticking at 5 invocations per 5-minute period — exactly the 1/min the
+      EventBridge rule fires, with no retry amplification
+
+**Not verified, and worth being straight about.** The reservations have never been
+exercised under real concurrency. Measured peaks are 1–4 per function against
+reservations of 5–60, so the *sizing* remains untested in the only way that would
+matter, which is load. Twenty-five quiet minutes proves the deploy did not break
+anything; it does not prove a single number is right. The first real test is production
+traffic, and the signal to watch is per-function `Throttles` — under reserved
+concurrency a throttle now means "this function's own reservation is too low", which is
+a different fault from the account exhaustion this work removed.
 
 **Rollback.** `git revert` this commit and redeploy — that is the correct procedure, and
 it is not the same as dropping the feature flag. **Deploying with the flag off removes

@@ -36,8 +36,19 @@ aws lambda get-account-settings --region ap-south-1 \
 
 Twelve functions now carry a reservation (267 total, 733 unreserved against an AWS
 floor of 100), and the API Gateway throttles have returned to their designed width.
-Full write-up, including the sizing method and the two corrections made to the
-original plan, is in `docs/LOG.md`. (From audit B4 / item 3.)
+
+**Deployed 2026-08-06 18:18 UTC (`f07d204`), `UPDATE_COMPLETE` in 21.9s.** Verified
+live: reservations sum to 267 and AWS independently reports 733 unreserved; throttles
+are 100/200 stage, 20/40 dashboard, 5/10 on the four heavy writes; all five alarms
+`OK`; `/health` 200 on GET and HEAD; `verify.sh` GREEN; and zero throttles and zero
+Lambda errors in the 25 minutes after the deploy. Full write-up, including the sizing
+method and the two corrections made to the original plan, is in `docs/LOG.md`.
+(From audit B4 / item 3.)
+
+**Still open, deliberately.** The reservations are untested under load — measured peaks
+are 1–4 per function against reservations of 5–60. Re-tune on trigger, not on a
+calendar: any per-function `Throttles > 0`, sustained concurrency above 60% of a
+reservation, or any change to the API Gateway rate limits.
 
 ---
 
