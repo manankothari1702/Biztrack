@@ -46,7 +46,10 @@ export const DataProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
 
     const orgTree = useMemo(() => buildOrgTree(orgNodes), [orgNodes]);
 
-    const fetchAll = useCallback(async (retries = 2) => {
+    // Named function expression, not an arrow: the retry below then recurses into
+    // this function itself rather than reaching back out to the `fetchAll` const,
+    // which is not initialised yet at the point the closure is created.
+    const fetchAll = useCallback(async function fetchAll(retries = 2): Promise<void> {
         try {
             const [profile, { orgNodes: nodes }] = await Promise.all([
                 userApi.getProfile(),
