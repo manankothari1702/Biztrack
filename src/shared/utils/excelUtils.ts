@@ -115,7 +115,7 @@ export interface ValidationResult {
 // IMPORT LOGIC
 // ==========================================
 
-export const parseExcel = async (file: File): Promise<any[]> => {
+export const parseExcel = async (file: File): Promise<Record<string, unknown>[]> => {
     if (file.size > MAX_EXCEL_SIZE_BYTES) {
         throw new Error('File too large. Maximum allowed size is 5 MB.');
     }
@@ -409,13 +409,17 @@ const parsePhoneNumber = (raw: unknown): { mobile: string, countryCode: string, 
     return { mobile, countryCode, isValid: true };
 };
 
-const formatDate = (dateVal: any): string => {
+const formatDate = (dateVal: unknown): string => {
     if (!dateVal) return '';
     let date: Date;
-    if (typeof dateVal === 'object' && dateVal && typeof dateVal.toDate === 'function') {
-        date = dateVal.toDate();
+    // Firestore Timestamp compatibility: values written before the move off
+    // Firebase can still be a { toDate(): Date } object rather than a string.
+    // Client types these fields as string, so the branch is invisible to the
+    // type system and the casts below are what keep it reachable. Do not remove.
+    if (typeof dateVal === 'object' && dateVal && typeof (dateVal as { toDate?: unknown }).toDate === 'function') {
+        date = (dateVal as { toDate: () => Date }).toDate();
     } else {
-        date = new Date(dateVal);
+        date = new Date(dateVal as string | number | Date);
     }
     if (isNaN(date.getTime())) return '';
     const day   = date.getDate().toString().padStart(2, '0');
@@ -424,7 +428,7 @@ const formatDate = (dateVal: any): string => {
     return `${day}/${month}/${year}`;
 };
 
-const parseFlexibleDate = (value: any): string | null => {
+const parseFlexibleDate = (value: unknown): string | null => {
     if (!value) return null;
     if (typeof value === 'number') {
         const date = new Date(Math.round((value - 25569) * 86400 * 1000));
