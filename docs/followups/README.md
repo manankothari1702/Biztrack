@@ -265,6 +265,68 @@ which cannot reproduce either failure.
 Surfaced by the health-gate work (`d587f6d`); `docs/LOG.md` records cause 1 only,
 because cause 2 was found later, while filing this entry.
 
+### FU-EOS-9 · Four `set-state-in-effect` suppressions left in place  → surfaced 2026-08-06 · 🟢 P3
+
+**Nothing is broken. This is a consistency debt, filed so it is a decision rather
+than an oversight.** While clearing the FU-EOS-4 lint baseline, `RescheduleModal`
+was found to be the *fifth* place with a `react-hooks/set-state-in-effect`
+problem. The other four already carry an `eslint-disable-next-line`:
+
+| File | Line | What the effect does |
+|---|---|---|
+| [`src/shared/components/common/PhoneNumberInput.tsx`](../../src/shared/components/common/PhoneNumberInput.tsx#L46) | 46 | syncs country + number when the `value` prop changes |
+| [`src/features/team/components/NodeModal.tsx`](../../src/features/team/components/NodeModal.tsx#L21) | 21 | resets the form when the modal opens |
+| [`src/features/clients/components/ClientModal.tsx`](../../src/features/clients/components/ClientModal.tsx#L48) | 48 | resets the form when the modal opens |
+| [`src/features/clients/components/CallOutcomeModal.tsx`](../../src/features/clients/components/CallOutcomeModal.tsx#L60) | 60, 73 | resets on open; re-defaults the date when the outcome changes |
+
+`RescheduleModal` was fixed structurally instead (`2376a07`): the parent now
+mounts it only while open, so the default comes from a `useState` initialiser
+and the effect is gone. That also removed a real if minor defect — the first
+painted frame had been showing the previous value for one render.
+
+**Why the other four were not done at the same time.** The lint baseline work was
+scoped to removing errors, and these four are already silent. Fixing them is a
+component-lifecycle change each, in three different features, with no test
+coverage to catch a mistake (`src/` renders no components in its suite — FU-B11).
+Bundling four such changes into a lint cleanup is how a green gate ships a
+regression.
+
+**The uncomfortable part, stated plainly:** the codebase now handles one rule two
+different ways — four suppressions and one structural fix. That is worse than
+either policy applied consistently, and it will read as arbitrary to whoever
+finds it next. This entry is the explanation.
+
+Two of the four are the same shape `RescheduleModal` had (reset-on-open in
+`NodeModal` and `ClientModal`), so the same fix applies: gate the mount in the
+parent, move the default into `useState`. `CallOutcomeModal`'s second effect and
+`PhoneNumberInput` are genuine prop-sync effects and need more thought —
+`PhoneNumberInput` also owns warning **W4** below, and the two should be looked at
+together rather than separately.
+
+**Do them one component at a time, each with its own commit and its own manual
+check of the affected form.** Not one sweep.
+
+### FU-EOS-10 · Three `exhaustive-deps` warnings, deliberately unchanged  → surfaced 2026-08-06 · 🟢 P3
+
+Left after FU-EOS-4. Warnings, not errors, so they do not fail `npm run lint` or
+the gate. Recorded because "we looked at these and chose to leave them" is worth
+more than silence.
+
+- [`Clients.tsx:308`](../../src/features/clients/pages/Clients.tsx#L308) — **leave
+  alone.** Empty deps are deliberate and commented, guarded by `hasCleanedUrlRef`.
+  Adding `navigate`/`searchParams` risks re-running a `navigate(..., { replace: true })`.
+- [`CallOutcomeModal.tsx:67`](../../src/features/clients/components/CallOutcomeModal.tsx#L67)
+  — harmless. The missing `initialFrequency` would only matter if it changed while
+  the modal was open, which is not a reachable state.
+- [`PhoneNumberInput.tsx:61`](../../src/shared/components/common/PhoneNumberInput.tsx#L61)
+  — **the one worth revisiting (W4).** The effect fires only on `value` but its
+  guard reads `phoneNumber` and `selectedCountry.code` from a closure captured on
+  the previous `value` change, so it can compare against stale state and skip a
+  sync it should perform. Low severity — the fields reconcile on the next `value`
+  change — and pre-existing. Fixing it changes when the effect runs, in a control
+  that already has a `set-state-in-effect` suppression (FU-EOS-9), so it is a
+  behaviour change needing manual testing, not a lint tidy-up. Do it with FU-EOS-9.
+
 ---
 
 ## Group B — deferred backlog (feature/infra work, not gating correctness)
