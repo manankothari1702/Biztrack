@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 # Runs the release gate's fast tier before every commit.
 #
-# NOT ENABLED YET. Turn it on with:
+# ENABLED 2026-08-06, once FU-EOS-4 cleared the last of the 15 lint errors and
+# `./verify.sh --fast` went green. Each clone must opt in once, because
+# core.hooksPath is local config and cannot be committed:
 #
 #     git config core.hooksPath .githooks
 #
-# It is deliberately left opt-in: `./verify.sh --fast` is currently RED because
-# `npm run lint` has 15 pre-existing errors (recorded in the AI-EOS adoption
-# baseline, 2026-08-05). Enabling the hook today would block every commit and
-# teach everyone to reach for --no-verify, which is worse than no hook at all.
+# Confirm with `git config core.hooksPath` - it should print `.githooks`.
 #
-# Enable it the day lint goes green. That is the point of tracking FU-EOS-4.
+# It stayed off until lint went green on purpose: a hook that blocks every
+# commit teaches everyone to reach for --no-verify, which is worse than no hook.
+#
+# On Linux and macOS this needs `verify.sh` to carry the executable bit, which
+# it does not yet - see FU-EOS-8. Windows ignores the mode bit, so the hook runs
+# there today.
 exec ./verify.sh --fast

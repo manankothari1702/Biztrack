@@ -138,15 +138,51 @@ endpoint, watch real traffic for a week (Cognito Hosted UI redirects and the Fon
 / ExcelJS bundles are the likely violations), then promote to enforcing. `verify.sh`
 already checks for the header and currently skips it with this reason.
 
-### FU-EOS-4 · `npm run lint` is red — 15 errors  → 🟡 P2
-Pre-existing, recorded in the adoption baseline (commit `c94fd0e`), **not** introduced
-by adoption. Unused `catch` bindings in `dateUtils.ts`, three `no-explicit-any` in
-`excelUtils.ts`, and a `react-hooks/immutability` error in the data context.
+### FU-EOS-4 · ~~`npm run lint` is red — 15 errors~~ — RESOLVED 2026-08-06
 
-This is the one blocking the pre-commit hook: `.githooks/pre-commit` exists but is
-deliberately **not enabled**, because turning it on while `verify.sh --fast` is red
-would block every commit and teach everyone to reach for `--no-verify`. Fix the 15
-errors, then run `git config core.hooksPath .githooks` and the gate becomes automatic.
+**Done. 15 errors → 0, and `./verify.sh` is GREEN end to end** — including the live
+AWS checks. The pre-commit hook is enabled and was proven to block a bad commit.
+Full write-up in `docs/LOG.md`.
+
+The original entry named 6 of the 15 errors (`dateUtils.ts`, `excelUtils.ts`, the data
+context). **The other 9, across 6 more files, were counted but never described** — so
+anyone scoping this from the entry alone would have under-planned it by more than
+half. What was actually there, and what it took:
+
+| Batch | Commit | Findings | Nature |
+|---|---|---|---|
+| 1 | `4e0acb1` | 4 unused bindings (`dateUtils` ×2, `DatePicker`, and an unused CDK import in `infra/`) | dead code |
+| 2 | `a203297` | `no-useless-escape` in `Login.tsx`, 2 needless casts | style / type-only |
+| 3 | `237a99f` | 2 `@ts-ignore` → `@ts-expect-error` | comment only |
+| 4 | `fdb2050` | 3 `no-explicit-any` in `excelUtils.ts` | type narrowing |
+| 5A | `489eec2` | `react-hooks/immutability` in `DataContext` | React correctness |
+| 5B | `ec63a22` | `preserve-manual-memoization` in `Calendar` (+1 warning) | React correctness |
+| 5C | `2376a07` | `set-state-in-effect` in `RescheduleModal` | React correctness |
+
+**Two findings turned out to be real defects, not lint noise.** `RescheduleModal`
+painted an empty date input for one frame before an effect corrected it (5C, measured
+via `react-dom/server`). And `DataContext`'s retry recursed through the callback
+binding rather than itself, which is harmless at `[]` deps but becomes a stale-closure
+bug the moment anyone adds one (5A). The other thirteen were genuinely cosmetic.
+
+**Batches 1–4 changed no runtime behaviour at all** — verified by transpiling each
+file before and after and diffing: byte-identical output in every case except the
+`Login.tsx` regex, which was proven equivalent across the whole BMP. `excelUtils`
+additionally got an import/export round trip on representative spreadsheet data.
+
+**The hook now needs one opt-in per clone**, because `core.hooksPath` is local config
+and cannot be committed:
+
+```
+git config core.hooksPath .githooks
+```
+
+On Linux and macOS it also needs the executable bit on `verify.sh`, which is still
+missing — **FU-EOS-8**. Windows ignores the mode bit, so it works there today.
+
+**Left behind on purpose:** four suppressions of `set-state-in-effect` (**FU-EOS-9**)
+and three `exhaustive-deps` warnings (**FU-EOS-10**), one of which is the only finding
+in the whole baseline with a plausible user-visible bug.
 
 ### FU-EOS-5 · Stale artefacts still tracked in git  → 🟢 P3
 `.gitignore` now ignores them, but these were already committed and remain in the repo:

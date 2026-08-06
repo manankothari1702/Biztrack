@@ -110,9 +110,12 @@ grep -q '@.ai-eos/AGENTS.md' AGENTS.md 2>/dev/null \
 
 # --- lint + types -----------------------------------------------------------
 if have npm; then
+  # The 15-error baseline recorded at AI-EOS adoption was cleared 2026-08-06
+  # (FU-EOS-4). Lint is now a real gate: any error here is a NEW regression.
+  # Three warnings remain by choice and do not fail the build - FU-EOS-10.
   npm run -s lint >/dev/null 2>&1 \
     && pass "lint (frontend)" \
-    || fail "lint (frontend)" "npm run lint failed - 15 errors were already present at AI-EOS adoption (2026-08-05); this is a to-do list, not a new regression"
+    || fail "lint (frontend)" "npm run lint failed - the baseline is zero errors, so this is a new regression. Run: npm run lint"
   npx -y tsc -b --noEmit >/dev/null 2>&1 \
     && pass "types (frontend)" || fail "types (frontend)" "tsc failed"
 else

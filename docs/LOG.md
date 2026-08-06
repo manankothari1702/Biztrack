@@ -737,3 +737,139 @@ the release gate unrunnable on a fresh clone. A one-line `.gitattributes`
 and production is byte-identical either way.
 
 ---
+
+## [2026-08-06] — Frontend lint baseline cleared, 15 → 0 (FU-EOS-4), pre-commit hook enabled
+
+**Status:** Implemented and verified. **Nothing was deployed and nothing in production
+changed.** Eight commits, all frontend/build-time; the CDK stack, the Lambdas, the
+table and every deployed artefact are untouched. `./verify.sh` is now GREEN end to
+end for the first time since AI-EOS adoption.
+
+**What this closes.** The 15 lint errors recorded at adoption (`c94fd0e`) were the
+single remaining RED item in the gate, and therefore the single reason
+`.githooks/pre-commit` was left disabled. Both are now resolved.
+
+**The entry under-described its own scope.** FU-EOS-4 named 6 of the 15 errors. The
+other 9, spread over 6 more files, were counted but never listed — including a CDK
+error in `infra/`, which is in scope because the root `eslint.config.js` matches
+`**/*.{ts,tsx}` and ignores only `dist`. Anyone planning from the entry alone would
+have been out by more than half. Fixed by auditing the full output first, then
+batching.
+
+**Eight commits, smallest and safest first:**
+
+| Batch | Commit | What | Runtime change |
+|---|---|---|---|
+| 1 | `4e0acb1` | 4 unused bindings + 1 unused CDK import | none |
+| 2 | `a203297` | redundant regex escape, 2 needless casts | none |
+| 3 | `237a99f` | `@ts-ignore` → `@ts-expect-error` ×2 | none |
+| 4 | `fdb2050` | 3 `no-explicit-any` in `excelUtils.ts` | none |
+| 5A | `489eec2` | `DataContext` retry recurses into itself | 2 lines |
+| 5B | `ec63a22` | `getItemsForDay` memoised for the Calendar memo | 4 lines |
+| 5C | `2376a07` | reschedule modal seeds its date on mount | lifecycle |
+| — | `8fa5c08` | FU-EOS-9 and FU-EOS-10 filed | docs |
+
+**Two of the fifteen were real defects.** The reschedule modal painted an empty date
+input for one frame before its effect corrected it — measured, not inferred, by
+rendering both versions through `react-dom/server`, which runs `useState` initialisers
+but not effects, i.e. exactly the first-paint frame:
+
+```
+FIRST PAINT, before : <empty>
+FIRST PAINT, after  : 2026-08-07   (tomorrow, as intended)
+```
+
+And `DataContext`'s retry called the `fetchAll` const rather than itself. Harmless at
+`[]` deps, because `useCallback` keeps returning the first instance — but it becomes a
+stale-closure bug the day anyone adds a dependency. The remaining thirteen were
+cosmetic.
+
+**How "no behaviour changed" was established, rather than asserted.** Every file in
+batches 1–4 was transpiled before and after and the output diffed. All byte-identical
+except `Login.tsx`, whose one-character regex change was proven equivalent on every
+code point in U+0000–U+FFFF, then checked against Cognito's full `requireSymbols` set
+and a battery of passwords (a 12-char password whose only symbol is `[` is still
+accepted). The unused CDK import was proven inert the same way: `tsc` elides it, so
+`infra/lib/biztrack-stack.js` — the file `cdk` executes — is byte-identical across the
+change, 1,062 lines, no `cdk diff` required.
+
+Batches 4 and 5 got behavioural harnesses instead, since their emitted code does move:
+
+- **`excelUtils`** — an import/export round trip against the real module with the DOM
+  stubbed, on a deliberately awkward fixture: junk rows above the header, mixed header
+  spellings, dates as `dd/MM/yyyy` / real `Date` / Excel serial, phones with and
+  without country codes, rich-text, formula and hyperlink cells, a duplicate, an
+  invalid mobile, a missing name, a quoted-comma CSV, plus the oversize and
+  bad-extension rejections. 9 xlsx rows, 2 csv rows, 2 rejections, 5 export rows,
+  4 re-imported rows — **identical before and after**, including the Firestore
+  `Timestamp` compatibility branch and the CSV-injection prefixing. Only the values
+  that are nondeterministic by design were normalised: 11 generated UUIDs and 3
+  `new Date()` fallbacks.
+- **`DataContext`** — all five paths through `fetchAll` driven with mocked deps: happy,
+  404→provision-ok, 404→provision-fail, transient-then-success, retries-exhausted.
+  Identical call sequences, identical 1500ms sleeps, one `Sync Error` toast not one
+  per attempt, and the initial promise still resolves only after the whole retry chain
+  so the loading screen does not flash between attempts.
+- **`Calendar`** — ten renders replayed through the old and new hook wiring using the
+  app's real `isSameDay`. **7 memo recomputes before, 7 after**, identical cell
+  contents at every step. The three renders where both correctly *skip* the work
+  (opening the month selector, selecting a day, an unrelated re-render) are the
+  important ones: a carelessly widened dep array would have silently degraded the memo
+  into recomputing every render, and the calendar would still have looked right.
+
+**The pre-commit hook is enabled and was proven to block.** A file with a single
+`no-explicit-any` — valid TypeScript, so only lint could object — was staged and
+committed:
+
+```
+X  lint (frontend)
+   npm run lint failed - the baseline is zero errors, so this is a new regression.
+/  types (frontend)          <- confirms lint alone objected
+verify --fast: RED
+git commit exit code: 1
+```
+
+`HEAD` was unchanged and the commit exists nowhere in the repo. The temporary file was
+then removed and the gate returned to GREEN. **`core.hooksPath` is local config and
+cannot be committed, so every clone must run `git config core.hooksPath .githooks`
+once** — recorded in `.githooks/pre-commit` itself.
+
+**`verify.sh`'s lint failure message was rewritten.** It still said "15 errors were
+already present at AI-EOS adoption; this is a to-do list, not a new regression" — which
+became false the moment the count hit zero, and would have taught the next person to
+ignore a genuine regression. It now says the baseline is zero and any error is new.
+
+**Verification**
+
+- [x] `npm run lint` — **0 errors**, 3 warnings (all deliberate, FU-EOS-10)
+- [x] `npx tsc -b --noEmit` clean
+- [x] 433 tests pass, unchanged: lambda 264, root 113, infra 56
+- [x] `npm run build` and the lambda build both succeed
+- [x] Full `./verify.sh` GREEN end to end, including the live AWS checks:
+      `health: healthy`, `health detail auth-gated`, security headers, PITR enabled,
+      `alarms reach a human`
+- [x] Pre-commit hook blocks a bad commit (exit 1, `HEAD` unmoved) and permits a clean
+      one — this entry's own commit went through it
+- [x] No tracked file contains CRLF, checked after every commit — the FU-EOS-8
+      invariant survived all eight
+
+**Not verified, and worth being straight about.** No browser session was run at any
+point. `src/` renders no components in its test suite (FU-B11), and reaching the
+Calendar or the data provider means authenticating against the production Cognito pool
+because there is no dev stack (FU-B6). Batches 5A–5C are therefore backed by
+hook-level and first-paint evidence, not by a live click-through. The three riskiest
+changes are each a separate commit for exactly that reason: `489eec2`, `ec63a22` and
+`2376a07` revert independently. **A single live pass over the calendar reschedule
+flow, the client import and a fresh sign-in would close the gap cheaply** and is the
+recommended next action for the owner.
+
+**Left open on purpose:** **FU-EOS-9** (four `set-state-in-effect` suppressions — the
+codebase now handles one rule two ways, which is worse than either policy applied
+consistently) and **FU-EOS-10** (three `exhaustive-deps` warnings, one of which,
+`PhoneNumberInput`, is the only finding in the whole baseline with a plausible
+user-visible bug). Both are P3 and cross-linked, since they meet in the same component.
+
+**Rollback:** revert any batch independently; they do not depend on each other. To
+disable the hook: `git config --unset core.hooksPath`.
+
+---
