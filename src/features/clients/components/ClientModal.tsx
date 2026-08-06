@@ -171,9 +171,9 @@ const ClientModal: React.FC<ClientModalProps> = ({ isOpen, onClose, onSave, init
         if (newClient.lastContactDate === undefined) {
             delete newClient.lastContactDate;
         }
-        // @ts-ignore
+        // @ts-expect-error deprecated 'priority' field is absent from Client by design
         if (newClient.priority) {
-            // @ts-ignore
+            // @ts-expect-error deprecated 'priority' field is absent from Client by design
             delete newClient.priority;
         }
         onSave(newClient);
