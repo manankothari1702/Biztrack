@@ -211,6 +211,60 @@ there: correcting an unrelated document is not a side effect a health-gate commi
 should carry. Verify the intended canonical URL with the owner before editing —
 this records which URL git uses, not which one is meant to be permanent.
 
+### FU-EOS-8 · No `.gitattributes`, so a fresh clone cannot run `./verify.sh`  → surfaced 2026-08-06 · 🟡 P2
+
+**The release gate is not reliably runnable from a fresh clone.** Two independent
+causes, both invisible on the machine the repo was built on.
+
+**Cause 1 — line endings.** `core.autocrlf=true` is set and there is **no
+`.gitattributes`**. Every blob in the repo is stored LF (verified repo-wide, two
+methods: **zero** tracked files contain CRLF), and the current working copy is LF, so
+nothing is broken *today*. But `autocrlf=true` converts LF to **CRLF on checkout**, so
+a fresh clone on Windows writes `#!/usr/bin/env bash\r`, which fails to execute. The
+repo is one `git clone` away from a gate that will not start, and the machine it was
+authored on will never show the symptom.
+
+**Cause 2 — the executable bit was never set.** Found while checking cause 1:
+
+```
+100644 verify.sh              <- not 100755
+100644 .githooks/pre-commit   <- not 100755
+```
+
+So `./verify.sh` fails on Linux and macOS regardless of line endings. This has been
+invisible because Windows ignores the mode bit, and every run in this repo's history
+has effectively been `bash verify.sh`. All three documents that define "done" say
+`./verify.sh`: [`AGENTS.md:26`](../../AGENTS.md), `.ai-eos/AGENTS.md:52` and
+[`README.md:181`](../../README.md).
+
+**Scope — four files, and only two carry an extension:**
+
+| Path | Note |
+|---|---|
+| `verify.sh` | the gate |
+| `.githooks/pre-commit` | **no extension** — a `*.sh` rule alone misses it |
+| `.ai-eos/templates/new-project/verify.sh` | vendored template |
+| `.ai-eos/templates/new-project/.githooks/pre-commit` | vendored template, no extension |
+
+A root `.gitattributes` covers the two vendored paths without hand-editing `.ai-eos/`,
+which `BUILD.md` forbids.
+
+**Does the policy disturb anything else? No — and this was checked, not assumed.**
+Nothing in the repo is stored with CRLF, so a narrow rule changes how **zero** other
+files are stored. Resist the blanket `* text=auto eol=lf`: it is unnecessary here
+(there is nothing to normalise), it puts every file at the mercy of git's binary
+heuristic, and it would make a future stray CRLF commit rewrite files wholesale.
+Narrow beats clever.
+
+**Fix, roughly ten minutes:** add `.gitattributes` with an `eol=lf` rule covering
+`*.sh` **and** the two extensionless hook paths; then
+`git update-index --chmod=+x verify.sh .githooks/pre-commit`. **Verify by cloning into
+a scratch directory and running `./verify.sh` there** — not by re-running it here,
+which cannot reproduce either failure.
+
+Surfaced by the health-gate work (`d587f6d`); `docs/LOG.md` records cause 1 only,
+because cause 2 was found later, while filing this entry.
+
 ---
 
 ## Group B — deferred backlog (feature/infra work, not gating correctness)
