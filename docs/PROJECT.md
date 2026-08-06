@@ -131,9 +131,12 @@ FAILURE MODES:
   no undo (§8 D-01). This is a known gap, tracked as FU-EOS-1.
 - No general `audit_log`. Stock movements are audited; client/task/product edits are
   not — you cannot answer "who changed this client, and when?"
-- Lambda account concurrency is **10** (AWS new-account floor). The whole app shares
-  those 10 slots. Tracked as FU-0 in `docs/followups/README.md` — this is a live
-  availability risk, not a backlog item.
+- ~~Lambda account concurrency is **10**~~ — **resolved 2026-08-06 (FU-0).** The quota
+  is now **1,000** and twelve functions carry a reserved concurrency, so one bulk
+  import can no longer starve signup. 267 reserved, 733 unreserved.
+  `biztrack-post-confirmation` is the only function left on the shared pool, by
+  decision — it is the signup critical path and rare, and every heavy function is now
+  capped so nothing can drain the pool beneath it.
 - No CI. Tests and lint run only when a human runs them.
 - `npm run lint` is **red** (15 errors) and has been for some time.
 

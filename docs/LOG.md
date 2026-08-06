@@ -873,3 +873,106 @@ user-visible bug). Both are P3 and cross-linked, since they meet in the same com
 disable the hook: `git config --unset core.hooksPath`.
 
 ---
+
+## [2026-08-06] — Lambda concurrency: quota 10 → 1000, reserved concurrency enabled (FU-0), not deployed
+
+**The whole app shared ten concurrency slots.** Account `346299179287` / ap-south-1 sat
+at `ConcurrentExecutions = 10` — the AWS new-account floor — and all fourteen functions
+drew from it. One bulk import next to the per-minute scheduler could starve signup, the
+dashboard and the health probe simultaneously, with no attacker and no bug.
+
+**The reason it stayed that way for a month: nobody had asked.**
+`list-requested-service-quota-change-history-by-quota` returned an **empty list** on
+2026-08-06 — the increase was not pending, not denied, never filed. FU-0 had been
+carried as P0 since July on the understanding that the fix was known and the only
+missing step was AWS's review queue. The request itself was the missing step. Filed
+2026-08-06 17:10 IST, case closed the same day, `ConcurrentExecutions` now **1000**.
+
+**Confirm the applied limit, never the approval mail.** The Service Quotas case can
+close before Lambda sees the new value, and `cdk deploy` validates against what Lambda
+reports. `aws lambda get-account-settings` is the gate; it now reads 1000/1000.
+
+**What shipped in the stack.** Twelve functions carry a reservation — **267 reserved,
+733 unreserved** against an AWS floor of 100. A reservation is both a floor and a
+ceiling: it guarantees the function its capacity and caps its blast radius at the same
+number, which is what stops one bulk import draining the pool.
+
+Sizing is `reservation >= throttle_rate x (p95_duration + cold_start)`. Cold start is
+~370ms and is **excluded from the `Duration` metric while still holding the slot**, so
+it has to be added by hand. Measured 30-day peaks were 1–4 per function, so every value
+carries 10–30x headroom.
+
+**Two numbers in the approved plan were wrong, and were corrected on evidence:**
+
+- **`whatsapp-scheduler` 2 → 5.** The original rationale — "one invocation/minute, 2
+  covers run-overlap" — counted the EventBridge tick but not Lambda's async retry
+  policy. A failing async invocation is retried twice, so one tick occupies **three**
+  slots. Not theorised: during the 2026-08-05 outage this function ran at 180
+  invocations/hour against a rule firing 60/hour, peaking at **3** concurrent. At a
+  reservation of 2 the third retry would hit its own ceiling — and throttled async
+  invokes are themselves retried, stacking a second amplification loop on top of the
+  one the original number missed.
+- **`health` unreserved → 5.** The old comment read "intentionally UNRESERVED: it must
+  answer even when the app is being throttled." That is the right goal reached by
+  exactly the wrong mechanism. Unreserved means *no floor* — under exhaustion the probe
+  is throttled alongside everything it exists to report on, and monitoring goes blind at
+  the one moment it matters. A reservation is the only construct that guarantees
+  capacity. 5 is not sized to load (measured demand is 0.015 concurrent); it is sized to
+  stay answerable during an incident with room for a second monitor and a manual curl.
+
+**`biztrack-post-confirmation` is deliberately the only function left unreserved.** It
+is the signup critical path and rare, and now that every heavy function is capped,
+nothing can drain the pool beneath it. That reasoning was previously written in the
+present tense while the flag was off, when it was not yet true.
+
+**API Gateway throttles returned to their designed width, last.** Stage 25/50 → 100/200,
+`/dashboard` 5/10 → 20/40, bulk paths 2/5 → 5/10. Ordering was not stylistic: raising
+the front door before the reservations existed would have removed the only thing
+protecting the shared pool.
+
+**25/50 was also the binding ceiling on the whole app, and not where anyone would look
+for it.** At two polled requests per session per 30s, 25 req/s is reached at roughly
+**375 concurrently open sessions with nobody clicking anything**. Lambda concurrency, at
+mean duration, would have supported several thousand. 100/200 moves that to ~1,500.
+
+**Bulk paths went to 5/10, not the 10/20 the in-code comment projected.** Each import
+holds its slot for the full 20s wall-clock guard, so the *rate* term is what bites: 10
+req/s sustained demands 200 concurrent against a `clients` reservation of 50. The burst
+term is the realistic shape for a human-driven import and fits easily. **Do not raise
+these without re-sizing `clients` and `products` first** — the two are coupled.
+
+**The throttle alarm's meaning changed without the alarm changing.** Before, every
+function shared one pool, so any throttle meant "the account is exhausted". Now a
+throttle means one of two different things, and `biztrack-lambda-throttles` is
+undimensioned so it fires identically for both. Its description now carries the split —
+a throttle on one function means that function hit its *own* reservation (raise it); a
+throttle with no single function responsible means the unreserved pool is exhausted,
+which hits signup first. The description is the runbook somebody reads at 3am.
+
+**Verification**
+
+- [x] `npx tsc --noEmit` clean (infra)
+- [x] `cdk synth -c reserveConcurrency=true` succeeds
+- [x] 56 infra tests pass
+- [x] Synthesized template: 267 reserved / 733 unreserved / 633 above the AWS floor
+- [x] `health` = 5, `scheduler` = 5, `post-confirmation` unreserved — all as approved
+- [x] Throttles in template: stage 100/200, dashboard 20/40, four bulk paths 5/10
+- [x] `cdk diff`: 15 resources, **all in-place `[~]`, zero replacements, zero IAM
+      changes**, zero deletions
+- [x] Rollback path (`cdk synth` without the flag) emits **0** reservations
+
+**Not verified, and worth being straight about.** Nothing is deployed. Every figure
+above comes from the synthesized template and a read-only change set, not from a live
+stack. The reservations have never been exercised under real concurrency — measured
+peaks are 1–4 per function against reservations of 5–60, so the *sizing* is untested in
+the only way that would matter, which is load. The first real test will be production
+traffic.
+
+**Rollback.** `git revert` this commit and redeploy — that is the correct procedure, and
+it is not the same as dropping the feature flag. **Deploying with the flag off removes
+the reservations but leaves the throttles at 100/200**, because the throttle values are
+not flag-gated. That combination is strictly worse than either the old or the new state:
+no per-function caps *and* a front door four times wider than the one that was
+compensating for their absence. The flag alone is not a rollback.
+
+---

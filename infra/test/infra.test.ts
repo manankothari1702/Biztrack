@@ -345,17 +345,17 @@ describe('throttling', () => {
     test('POST /products/bulk is capped like /clients/bulk', () => {
         const bulk = methodSettings().find(s => s.ResourcePath === '/~1products~1bulk' && s.HttpMethod === 'POST');
         expect(bulk).toBeDefined();
-        expect(bulk!.ThrottlingRateLimit).toBe(2);
-        expect(bulk!.ThrottlingBurstLimit).toBe(5);
+        expect(bulk!.ThrottlingRateLimit).toBe(5);
+        expect(bulk!.ThrottlingBurstLimit).toBe(10);
     });
 
-    test('POST /invoices carries the same 2/5 cap as the bulk writes', () => {
+    test('POST /invoices carries the same 5/10 cap as the bulk writes', () => {
         // The invoice create is a transaction; it belongs in the same weight
-        // class as the bulk imports, not the default 25/50.
+        // class as the bulk imports, not the default stage limit.
         const invoices = methodSettings().find(s => s.ResourcePath === '/~1invoices' && s.HttpMethod === 'POST');
         expect(invoices).toBeDefined();
-        expect(invoices!.ThrottlingRateLimit).toBe(2);
-        expect(invoices!.ThrottlingBurstLimit).toBe(5);
+        expect(invoices!.ThrottlingRateLimit).toBe(5);
+        expect(invoices!.ThrottlingBurstLimit).toBe(10);
     });
 
     test('finalize and cancel are NOT separately throttled — one-per-invoice, no fan-out', () => {

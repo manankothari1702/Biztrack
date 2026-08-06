@@ -13,26 +13,37 @@ requires a human to run/decide.
 
 ## ⚠️ P0 — DO NOW (owner action, do regardless of the feature backlog)
 
-### FU-0 · Raise Lambda account concurrency 10 → 1000
-**This is a live availability risk, not a backlog item.** Account `346299179287` / ap-south-1
-has `ConcurrentExecutions = 10` (AWS new-account floor, never raised). All 9 Lambdas share
-those 10 slots, so the per-minute WhatsApp scheduler + a couple of dashboard aggregates + the
-daily purge can **exhaust the pool and throttle the whole app with no attacker**. It also
-blocks the reserved-concurrency remediation (FU-B1) — at limit 10, any reserved value fails
-`cdk deploy`.
+### FU-0 · ~~Raise Lambda account concurrency 10 → 1000~~ — RESOLVED 2026-08-06
+
+**Quota raised and reserved concurrency implemented.** Account `346299179287` /
+ap-south-1 now reports `ConcurrentExecutions = 1000`, `UnreservedConcurrentExecutions
+= 1000`, confirmed via `aws lambda get-account-settings`.
+
+**The finding that made this take a year: the increase had never been requested.**
+`list-requested-service-quota-change-history-by-quota` returned an **empty list** on
+2026-08-06 — not pending, not denied, never filed. FU-0 had been carried as a P0 item
+since the July remediation on the assumption that the cure was known and the only
+missing step was AWS's review. The request itself was the missing step. The case was
+filed 2026-08-06 17:10 IST and closed the same day.
+
+Confirm the applied limit, not the approval mail — the Service Quotas case can close
+before Lambda sees the new limit, and `cdk deploy` validates against the applied value:
 
 ```
-aws service-quotas request-service-quota-increase \
-  --service-code lambda --quota-code L-B99A9384 --desired-value 1000 --region ap-south-1
+aws lambda get-account-settings --region ap-south-1 \
+  --query 'AccountLimit.{Concurrent:ConcurrentExecutions,Unreserved:UnreservedConcurrentExecutions}'
 ```
-Kick off early — AWS review can take a day or two. Confirm with
-`aws lambda get-account-settings`. (From audit B4 / item 3.)
+
+Twelve functions now carry a reservation (267 total, 733 unreserved against an AWS
+floor of 100), and the API Gateway throttles have returned to their designed width.
+Full write-up, including the sizing method and the two corrections made to the
+original plan, is in `docs/LOG.md`. (From audit B4 / item 3.)
 
 ---
 
 ## Owner gates — nothing in the remediation is live until these happen
 
-1. **FU-0** (above) — the actual cure for the limit-of-10.
+1. ~~**FU-0**~~ — done 2026-08-06, see above.
 2. **Deploy + run the per-item curl checks against the deployed stack.** All code is verified by
    simulation / read-only checks only; the deploy-gated curl checks (provided per item during
    remediation) are what turn "logic proven" into "works in production." That is the real
@@ -367,12 +378,28 @@ more than silence.
 
 ## Group B — deferred backlog (feature/infra work, not gating correctness)
 
-### FU-B1 · Enable Phase C reserved concurrency  → item 3 (B4)
-Written and flag-gated OFF (`cdk deploy -c reserveConcurrency=true`). Enable **only after FU-0**
-raises the quota (≥300). Before enabling, recompute the per-function numbers against the ACTUAL
-confirmed limit and re-verify `sum(reserved) ≤ limit − 100`. The plan now sums to **239** — it
-was 179 before the inventory handlers added products 30, batches 20, stockMovements 10.
-Optionally then loosen the Phase B throttles toward the in-code targets.
+### FU-B1 · ~~Enable Phase C reserved concurrency~~ — RESOLVED 2026-08-06  → item 3 (B4)
+
+Implemented with FU-0; deploy with `cdk deploy -c reserveConcurrency=true`. The total is
+**267**, not the 239 recorded here previously — that figure was one revision stale, predating
+the invoices handler, and two values were corrected on evidence before shipping:
+
+- **`whatsapp-scheduler` 2 → 5.** "One invocation/minute, 2 covers run-overlap" counted the
+  EventBridge tick but not Lambda's async retry policy. Measured peak was **3** concurrent
+  during the 2026-08-05 outage (180 invocations/hour against a rule firing 60/hour). A
+  reservation of 2 would have throttled the third retry — and throttled async invokes retry
+  again, stacking a second amplification loop on the one the number missed.
+- **`health` unreserved → 5.** The old comment said it must "answer even when the app is being
+  throttled", which is the right goal by the wrong mechanism: unreserved means no floor, so the
+  probe was throttled alongside everything it reports on. A reservation is what guarantees it.
+
+Throttles were loosened at the same time, but bulk paths went to **5/10, not the 10/20** the
+in-code comment projected — 10 req/s sustained against a 20s wall-clock guard would demand 200
+concurrent versus a `clients` reservation of 50. **Do not raise the bulk rate limits without
+re-sizing `clients` and `products` first.**
+
+Re-tune on trigger, not on a calendar: any per-function `Throttles > 0`, sustained concurrency
+above 60% of a reservation, or any change to the API Gateway rate limits.
 
 ### FU-B2 · Cognito MFA rollout  → item 7 (C2)
 Proposal-only; pool untouched. Optional-but-unprompted MFA buys little — recommended: a

@@ -380,19 +380,34 @@ export class BiztrackStack extends cdk.Stack {
             environment: commonEnv,
         } satisfies Partial<lambda.FunctionProps>;
 
-        // ── Reserved concurrency (Phase C, audit B4) ────────────────────────
-        // GATED OFF by default. Enable ONLY after the Lambda account concurrency
-        // quota is raised to >=300 (Phase A) via:  cdk deploy -c reserveConcurrency=true
-        // AWS requires >=100 unreserved concurrency to remain in the account, so at
-        // the current account limit of 10 ANY reserved value fails `cdk deploy`. With
-        // the flag OFF, rc() returns {} so no reservedConcurrentExecutions is set and
-        // every function stays unreserved (shared pool) -> deploy succeeds at limit 10.
-        // NOTE: the numbers at each call site assume the quota is raised to ~1000.
-        // Before enabling, recompute against the ACTUAL confirmed limit and re-verify
-        // sum(reserved) <= (limit - 100). Planned: user 60, clients 50, dashboard 30,
-        // tasks 30, products 30, batches 20, invoices 20, stockMovements 10,
-        // whatsappTest 5, scheduler 2, purge 2, postConfirmation UNRESERVED (signup
-        // critical-path) = 259 total (was 239 before invoices, 179 before inventory).
+        // ── Reserved concurrency (Phase C, audit B4 · FU-0) ─────────────────
+        // Enable with:  cdk deploy -c reserveConcurrency=true
+        //
+        // A reservation is BOTH a floor and a ceiling: it guarantees the function
+        // that capacity, and caps its blast radius at the same number. That dual
+        // nature is the whole point — one bulk import can no longer starve signup.
+        //
+        // PREREQUISITE, now satisfied. AWS requires >=100 unreserved concurrency to
+        // remain in the account. The account sat at the new-account floor of 10 until
+        // 2026-08-06, where ANY reserved value failed `cdk deploy`; the quota is now
+        // 1000 (confirmed via `aws lambda get-account-settings`, not via the approval
+        // mail — the case can close before the limit is applied).
+        //
+        // Sizing method:  reservation >= throttle_rate x (p95_duration + cold_start).
+        // Cold start is ~370ms and is EXCLUDED from the Duration metric while still
+        // holding the slot, so it must be added by hand. Measured 30-day peaks were
+        // 1-4 per function, so every value below carries 10-30x headroom.
+        //
+        //   user 60, clients 50, dashboard 30, tasks 30, products 30, batches 20,
+        //   invoices 20, stockMovements 10, health 5, whatsappTest 5, scheduler 5,
+        //   purge 2, postConfirmation UNRESERVED  = 267 total
+        //   (was 259 before FU-0 corrected health and scheduler; 239 before invoices;
+        //    179 before inventory). Leaves 733 unreserved against a floor of 100.
+        //
+        // With the flag OFF, rc() returns {} and every function stays unreserved.
+        // Re-tune on TRIGGER, not on a calendar: any per-function Throttles > 0,
+        // sustained concurrency above 60% of a reservation, or any change to the API
+        // Gateway rate limits below — the two are coupled by the formula above.
         const reserveConcurrency =
             this.node.tryGetContext('reserveConcurrency') === true ||
             this.node.tryGetContext('reserveConcurrency') === 'true';
@@ -433,9 +448,16 @@ export class BiztrackStack extends cdk.Stack {
                 APP_VERSION:  String(this.node.tryGetContext('appVersion') ?? 'unknown'),
                 HEALTH_TOKEN: String(this.node.tryGetContext('healthToken') ?? ''),
             },
-            // Intentionally UNRESERVED: it must answer even when the app is
-            // being throttled, otherwise monitoring goes blind exactly when it
-            // matters most.
+            // RESERVED, deliberately (FU-0). This was unreserved, with the comment
+            // "it must answer even when the app is being throttled" — which is the
+            // right goal reached by exactly the wrong mechanism. Unreserved means
+            // "shares the common pool with no floor", so under exhaustion the probe
+            // is throttled alongside everything it is supposed to be reporting on,
+            // and monitoring goes blind at the one moment it matters. A reservation
+            // is the only construct that guarantees capacity. 5 is not sized to load
+            // — measured demand is 0.015 concurrent — it is sized to stay answerable
+            // during an incident with room for a second monitor and a manual curl.
+            ...rc(5),
         });
 
         // Clients CRUD
@@ -531,7 +553,16 @@ export class BiztrackStack extends cdk.Stack {
             code: lambdaCode,
             handler: 'dist/whatsappScheduler.handler',
             timeout: cdk.Duration.seconds(120),
-            ...rc(2), // one invocation/minute; 2 covers run-overlap
+            // 5, not the 2 originally planned (FU-0). "One invocation/minute, 2
+            // covers run-overlap" counted the EventBridge tick but not Lambda's
+            // async retry policy: a failing async invocation is retried twice, so
+            // one tick can occupy THREE slots. Measured, not theorised — during the
+            // 2026-08-05 outage this function ran at 180 invocations/hour against a
+            // rule that fires 60/hour, peaking at 3 concurrent. At a reservation of
+            // 2 the third retry would hit its own ceiling, and throttled async
+            // invokes are themselves retried — a second amplification loop stacked
+            // on the one the original number missed.
+            ...rc(5),
         });
 
         // WhatsApp test (called directly from frontend via API Gateway)
@@ -597,30 +628,42 @@ export class BiztrackStack extends cdk.Stack {
             },
             deployOptions: {
                 stageName: 'prod',
-                // Phase B (audit B4) — PALLIATIVE, NOT THE CURE. Aligns the front door to
-                // the ~10-concurrency backend so overflow returns clean edge 429s instead
-                // of ugly Lambda-level throttle 500s. It does NOT fix "10 slots is too few
-                // for normal operation" — only raising the account concurrency quota
-                // (Phase A) does. POST-PHASE-A TARGET: raise stage back toward ~100/200 and
-                // the per-method caps below proportionally.
-                throttlingRateLimit: 25,
-                throttlingBurstLimit: 50,
+                // Phase B was PALLIATIVE: 25/50 shrank the front door to fit a
+                // 10-concurrency backend. FU-0 removed that constraint (quota now
+                // 1000, reservations now cap each function individually), so the
+                // stage returns to its designed width. This is deliberately the LAST
+                // step of FU-0 — raising the front door before the reservations exist
+                // would remove the only thing protecting the shared pool.
+                //
+                // 25/50 was also the binding ceiling on the whole app, and not where
+                // anyone would look for it: at 2 polled requests per session per 30s,
+                // 25 req/s is reached at ~375 concurrently open sessions with nobody
+                // clicking anything. 100/200 moves that to ~1,500.
+                throttlingRateLimit: 100,
+                throttlingBurstLimit: 200,
                 methodOptions: {
-                    // Most expensive read (6-query aggregate). Post-Phase-A target ~20/40.
-                    '/dashboard/GET':       { throttlingRateLimit: 5, throttlingBurstLimit: 10 },
-                    // Heaviest writes (bulk import/delete). Post-Phase-A target ~10/20.
-                    '/clients/bulk/POST':   { throttlingRateLimit: 2, throttlingBurstLimit: 5 },
-                    '/clients/bulk/DELETE': { throttlingRateLimit: 2, throttlingBurstLimit: 5 },
+                    // Most expensive read (6-query aggregate). 20 x (p95 1,108ms +
+                    // 370ms cold start) = 29.4 concurrent, against a reservation of 30.
+                    '/dashboard/GET':       { throttlingRateLimit: 20, throttlingBurstLimit: 40 },
+                    // Heaviest writes (bulk import/delete). 5/10, NOT the 10/20 the
+                    // Phase B comment projected. Each import holds its slot for the
+                    // full 20s wall-clock guard, so the RATE term is what bites:
+                    // 10 req/s sustained would demand 200 concurrent against a
+                    // reservation of 50. The burst term is the realistic shape for a
+                    // human-driven import (10 x 20s = 10 concurrent) and fits easily.
+                    // Do not raise these without re-sizing clients/products first.
+                    '/clients/bulk/POST':   { throttlingRateLimit: 5, throttlingBurstLimit: 10 },
+                    '/clients/bulk/DELETE': { throttlingRateLimit: 5, throttlingBurstLimit: 10 },
                     // Excel catalogue import: reads every existing product, then
                     // writes in batches. Same cost profile as /clients/bulk.
-                    '/products/bulk/POST':  { throttlingRateLimit: 2, throttlingBurstLimit: 5 },
+                    '/products/bulk/POST':  { throttlingRateLimit: 5, throttlingBurstLimit: 10 },
                     // Invoice create: a BatchGet + counter update + a multi-item
                     // transaction (invoice + batches + roll-ups + movements). The
                     // heaviest write in the app after the bulk imports, so it gets
                     // the same cap. finalize/cancel are {id} sub-paths and not
                     // separately throttled — they run the same transaction but are
                     // one-per-invoice, not fan-out.
-                    '/invoices/POST':       { throttlingRateLimit: 2, throttlingBurstLimit: 5 },
+                    '/invoices/POST':       { throttlingRateLimit: 5, throttlingBurstLimit: 10 },
                 },
             },
         });
@@ -878,17 +921,26 @@ export class BiztrackStack extends cdk.Stack {
         });
 
         // ── 3. A Lambda was throttled, ACCOUNT-WIDE ─────────────────────────
-        // The live availability risk in this app. Account concurrency is still
-        // 10 (the AWS new-account floor, never raised — FU-0), and all thirteen
-        // functions share it. One bulk import next to the per-minute scheduler
-        // can starve the whole app, and until now nothing would have said so.
-        // A throttle is never normal here: measured throttles over 14 days = 0.
+        // A throttle is never normal here: measured throttles over 30 days = 0.
+        //
+        // FU-0 changed what a throttle MEANS, without changing this alarm. Before,
+        // every function shared one pool of 10, so any throttle meant "the account
+        // is exhausted". Now each function has its own reservation, so a throttle
+        // means one of two different things — and this alarm, being undimensioned,
+        // fires identically for both. The description carries the split because the
+        // description is the runbook somebody reads at 3am.
         alarm('LambdaThrottlesAlarm', {
             alarmName: 'biztrack-lambda-throttles',
             alarmDescription:
-                'A Lambda invocation was throttled. The account concurrency limit is 10 '
-                + '(FU-0, never raised), shared by all 13 functions. Users are seeing failures '
-                + 'or the scheduler is being dropped.',
+                'A Lambda invocation was throttled. Since FU-0 this means one of two different '
+                + 'things, and this alarm cannot tell them apart because it is account-wide. '
+                + 'Find which function by graphing AWS/Lambda Throttles with a FunctionName '
+                + 'dimension in CloudWatch Metrics. IF ONE FUNCTION IS RESPONSIBLE: it hit its '
+                + 'OWN reserved concurrency, so that reservation is too low - raise it. IF NO '
+                + 'SINGLE FUNCTION IS RESPONSIBLE: the unreserved pool is exhausted, which hits '
+                + 'biztrack-post-confirmation (signup) first because it is the only function '
+                + 'with no reservation to fall back on - raise the account quota or lower total '
+                + 'reservations.',
             metric: new cloudwatch.Metric({
                 namespace:  'AWS/Lambda',
                 metricName: 'Throttles',
@@ -1045,11 +1097,12 @@ export class BiztrackStack extends cdk.Stack {
                     period:     FIVE_MIN,
                     label:      'Throttles (account)',
                 })],
-                // The ceiling everything in this app shares. MOVE THIS when FU-0
-                // raises the quota, or the line becomes a lie.
+                // The account ceiling. Moved 10 -> 1000 by FU-0 on 2026-08-06; the
+                // old line was drawn at the new-account floor. MOVE THIS AGAIN if
+                // the quota changes, or the line becomes a lie.
                 leftAnnotations: [{
-                    value: 10,
-                    label: 'account concurrency limit 10 (FU-0)',
+                    value: 1000,
+                    label: 'account concurrency limit 1000 (FU-0)',
                     color: cloudwatch.Color.RED,
                 }],
                 width: 12, height: 6,
