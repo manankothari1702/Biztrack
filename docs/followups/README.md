@@ -183,6 +183,34 @@ trusted to memory** (both also in `BR-BIZ-E06`):
 - The dashboard's red line at **concurrency 10** must move when **FU-0** raises the
   quota, or it is a lie drawn on a graph.
 
+### FU-EOS-7 · Repository URL in the docs is stale  → surfaced 2026-08-06 · 🟢 P3
+
+**Documentation drift only. Nothing is broken.** Two files name the repository as
+`github.com/mananmaheshwari1702/Biztrack`; the configured git remote is
+`github.com/manankothari1702/Biztrack.git`.
+
+Checked rather than assumed, 2026-08-06:
+
+| URL | Result |
+|---|---|
+| `manankothari1702/Biztrack` (the remote) | **HTTP 200** |
+| `mananmaheshwari1702/Biztrack` (the docs) | **HTTP 301** -> redirects to the above |
+
+So this is a GitHub account rename, and the old URL still works through GitHub's
+redirect. Nobody is blocked, which is exactly why it will sit there unnoticed —
+GitHub redirects survive indefinitely but are not a promise, and a `git clone` of
+the documented URL today succeeds, so the drift produces no error to trip over.
+
+Two occurrences, both one-line edits:
+- [`docs/PROJECT.md:31`](../PROJECT.md) — the Repository row in §2 Addresses
+- [`README.md:40`](../../README.md) — inside the `git clone` command in setup
+
+Surfaced while pushing the health-gate commit (`d587f6d`), whose push succeeded
+against the real remote and so exposed the mismatch. Deliberately **not** fixed
+there: correcting an unrelated document is not a side effect a health-gate commit
+should carry. Verify the intended canonical URL with the owner before editing —
+this records which URL git uses, not which one is meant to be permanent.
+
 ---
 
 ## Group B — deferred backlog (feature/infra work, not gating correctness)
