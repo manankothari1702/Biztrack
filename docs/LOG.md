@@ -1283,3 +1283,59 @@ The browser pass over the five flows is also still outstanding — everything ab
 API-level.
 
 ---
+
+## [2026-08-07] — Browser pass over the five flows against dev (FU-EOS-16)
+
+The API validation proved the foundation; this proves what a user actually touches.
+Driven headless against `http://localhost:5173` with `npm run dev` pointed at
+`BiztrackStack-dev`.
+
+**All five flows pass. No console errors at any step.**
+
+1. **Sign up** — form submitted, Cognito sent a real verification code, account created.
+2. **Login** — dashboard rendered as "Browser Tester" with every counter at zero, which
+   is what an empty environment should look like.
+3. **Create client** — "Browser UI Client" saved and listed as
+   `All Clients Database (1)`, next call `Aug 14, 2026`.
+4. **Create task** — "Browser UI Task" saved and listed, due `8/7/2026`.
+5. **Logout** — redirected to `/login`, **0 Cognito keys left in localStorage**, and a
+   direct request to `/` bounced back to `/login`, so the route guard holds.
+
+### This is also the isolation proof
+
+The signup landed in the **dev** pool while `list-users` on the production pool returned
+`None`. A browser session driven entirely through the UI could not reach production —
+which is the thing the whole environment split exists to guarantee, demonstrated rather
+than asserted.
+
+### It confirmed the FU-EOS-14 fix from the other direction
+
+The client form pre-filled its follow-up date as **2026-08-14** and the task form
+pre-filled its due date as **2026-08-07** — exactly +1 week and today, the same two
+defaults now applied server-side. The UI and the API agree on the values, which is what
+makes the server-side default a safety net rather than a second, competing policy.
+
+### One false alarm, recorded because the reasoning matters
+
+Sign Out appeared broken: two clicks, fresh element refs, no dialog captured, no console
+errors, and six Cognito keys still in localStorage. It looked like a logout bug in the
+exact flow under test.
+
+It was not. `Sidebar.tsx:89` opens a `ConfirmationModal` — logout is deliberately two
+steps, and the check that "proved" the failure was a 250-character text dump that cut
+off before the modal. Confirming through the modal logged out cleanly. **The tooling
+produced a convincing false positive, and only reading the component settled it.**
+Worth remembering the next time a UI check disagrees with the code.
+
+### Observation, not chased
+
+The dashboard's Recent activity showed the just-created client as **"10h ago"**. The
+record was seconds old. That is a display-time skew, not a data problem — the row itself
+carries a correct `createdAt`. Left alone deliberately: it is cosmetic, and expanding
+scope here was explicitly off the table. Logged as **FU-EOS-17**.
+
+### Cleanup
+
+Dev emptied again after the run. **dev 0 items / 0 users, prod 0 items / 0 users.**
+
+---

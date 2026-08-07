@@ -569,6 +569,20 @@ dev API**. The proxy runs only under `npm run dev`; production builds use the ab
 `VITE_API_URL` from `.env` and never touch it. Reaching production from localhost should
 be a deliberate override, not an omission.
 
+### FU-EOS-17 · Recent activity shows a seconds-old record as "10h ago"  → surfaced 2026-08-07 · 🟢 P3
+
+Seen during the browser pass: a client created seconds earlier appeared in the
+dashboard's Recent activity as **"10h ago"**. The stored `createdAt` is correct, so this
+is a display-time skew, not bad data.
+
+Likely a timezone handling gap in the relative-time formatting — `PROJECT.md` §6 notes
+the app bands dates using the `en-CA` locale trick to dodge a UTC off-by-one for the 5.5
+hours a day where UTC and IST fall on different dates, so relative time is a plausible
+place for that care to be missing.
+
+**Cosmetic, and deliberately not chased** — it misleads slightly on one dashboard card
+and touches no stored value. Fix it when someone is already in that formatter.
+
 ## Group B — deferred backlog (feature/infra work, not gating correctness)
 
 ### FU-B1 · ~~Enable Phase C reserved concurrency~~ — RESOLVED 2026-08-06  → item 3 (B4)
