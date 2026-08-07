@@ -1212,3 +1212,74 @@ FU-EOS-13 and FU-EOS-14 are **recorded, not fixed**. They are pre-existing and l
 through the UI, and fixing them is application work, not environment work.
 
 ---
+
+## [2026-08-07] — Fixed the two write-path bugs the dev validation found (FU-EOS-13, FU-EOS-14)
+
+Both were pre-existing in production code and both were found by actually exercising
+the new dev environment rather than by reading it.
+
+### FU-EOS-13 — the primary key came from the request body, unvalidated
+
+Three sites built a key straight from `body.id`: `addClient`, `bulkAdd` and `addTask`.
+With no `id` the key became the literal `CLIENT#undefined`, the write was a bare `Put`,
+and because every such request landed on that **same** key a second one silently
+overwrote the first. In the bulk path a whole import of id-less rows collapsed onto one
+key — 500 rows in, one row written, 500 reported imported.
+
+Fixed with `safeId()` in `lib/db.ts`, used at all three sites.
+
+**Why it generates rather than rejects.** `products.ts:475` has always done exactly
+this — `typeof body.id === 'string' && body.id ? body.id : newId()`. Following the
+convention already in the codebase beat inventing a second one, and it keeps callers
+working instead of returning a 400 for a field the SPA does supply. Keeping a
+caller-supplied id also preserves retry idempotency: replaying a create rewrites the
+same row rather than producing a duplicate, which a server-generated id would not.
+
+### FU-EOS-14 — records without a date were invisible in their own list
+
+`nextFollowUpDate` is the sort key of `GSI1-FollowUpDate` and `dueDate` is the sort key
+of `GSI2-TaskStatus`. Both default list queries use those indexes, and a GSI is
+**sparse** — DynamoDB does not project an item that lacks the index sort key. A client
+or task written without its date existed, was fetchable by id, and did not appear in
+the list. Fifteen seconds of retries ruled out eventual consistency.
+
+Fixed by defaulting both fields server-side when absent: follow-up to +1 week, due date
+to today.
+
+**The evidence that settled the approach.** Neither field was ever genuinely optional —
+the app treats both as mandatory everywhere except the API. `ClientModal.tsx:39`
+defaults follow-up to +1 week, `AddTaskModal.tsx:18` defaults due date to today, and
+both `ClientCard.tsx:24` and `TaskItem.tsx:93` call `new Date(...)` on them assuming
+they exist. The API was the only layer letting the field go missing, so the fix mirrors
+the UI's own defaults rather than inventing a policy.
+
+**Why not drop the sparse index instead.** Both screens take their ORDER from that
+index — clients by follow-up date, tasks by due date — and `useTasks` sends no sort
+parameter at all (`_sortBy` is unused), so the server's order is the only order there
+is. Querying the base table would have made every record visible but left both core
+screens in arbitrary key order, and would also have broken
+`listTasksByDateRange`'s deliberate exclusion of dateless tasks from the calendar.
+Defaulting keeps the ordering, the index and the calendar behaviour.
+
+### Verified, against dev after deploying (123.7s)
+
+- [x] `POST /clients` with **no `id` and no `nextFollowUpDate`** → 201 with a real UUID
+      echoed back and `nextFollowUpDate` set to +1 week
+- [x] `POST /tasks` with **no `id` and no `dueDate`** → 201, `dueDate` set to today
+- [x] Both appear in their default list — previously `{"clients":[],"count":0}`
+- [x] **Three successive id-less creates produced three distinct rows**, all three
+      listed. Before the fix that was one row and two silently destroyed.
+- [x] No `CLIENT#undefined` or `TASK#undefined` anywhere in the table
+- [x] Full dev validation still **12/12**; 264 lambda tests pass; `./verify.sh` GREEN
+- [x] dev emptied again afterwards — dev 0/0, prod 0/0
+
+### Not done
+
+**Production has not been deployed.** The fixes are live in dev only. Production is
+empty, so nothing is currently at risk from either bug, but the code running there is
+still the old code. Deploying is the owner's call.
+
+The browser pass over the five flows is also still outstanding — everything above is
+API-level.
+
+---

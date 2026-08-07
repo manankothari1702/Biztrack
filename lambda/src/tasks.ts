@@ -1,6 +1,6 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { PutCommand, GetCommand, DeleteCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
-import { db, TABLE, keys } from './lib/db';
+import { db, TABLE, keys, safeId } from './lib/db';
 import { ok, created, noContent, badRequest, notFound, serverError, getUid, resolveCors } from './lib/response';
 import { guardAccount } from './lib/accountGuard';
 import { stripTableKeys } from './lib/sanitize';
@@ -174,7 +174,15 @@ const addTask = async (uid: string, event: APIGatewayProxyEvent): Promise<APIGat
     const body = stripTableKeys(parseBody<Task>(event));
     if (typeof body.title !== 'string' || !body.title.trim()) return badRequest('title is required');
 
-    const item = { ...body, ...keys.task(uid, body.id) };  // keys MUST win
+    const id = safeId(body.id);  // never key off an unvalidated body.id (FU-EOS-13)
+    // dueDate is GSI2's sort key and the task list queries that index, so a task
+    // without one was invisible in the list (FU-EOS-14). AddTaskModal.tsx:18
+    // already defaults it to today and TaskItem.tsx:93 assumes it exists — this
+    // makes the API agree with the model the app already relies on.
+    const dueDate = typeof body.dueDate === 'string' && body.dueDate.trim()
+        ? body.dueDate
+        : new Date().toISOString();
+    const item = { ...body, ...keys.task(uid, id), id, dueDate };  // keys MUST win
     await db.send(new PutCommand({ TableName: TABLE, Item: item }));
     return created(stripKeys(item));
 };

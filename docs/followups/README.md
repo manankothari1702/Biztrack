@@ -458,7 +458,23 @@ Lambda scales to zero; CloudFront and the Cognito domain are the only standing i
 (EventBridge, every minute) and the daily purge Lambda. Against an empty table they do
 nothing, but they do invoke. Disable them in dev if the invocation noise ever matters.
 
-### FU-EOS-13 · The server takes an item's primary key from the request body, unvalidated  → surfaced 2026-08-07 · 🔴 P1
+### FU-EOS-13 · ~~The server takes an item's primary key from the request body, unvalidated~~ — RESOLVED 2026-08-07
+
+**Fixed and verified in dev.** `safeId()` in [`lib/db.ts`](../../lambda/src/lib/db.ts)
+resolves the id server-side: a caller-supplied one is kept (so replaying a create still
+rewrites the same row rather than duplicating), and a missing one becomes a
+`randomUUID()`. Applied at all three sites that built a key from the body — `addClient`,
+`bulkAdd` and `addTask`. It generates rather than rejecting because
+[`products.ts:475`](../../lambda/src/products.ts#L475) has always done exactly that, so
+this is the codebase's existing convention rather than a new one.
+
+Verified against dev after deploy: `POST /clients` with no `id` now returns a real UUID
+and echoes it, and **three successive id-less creates produced three distinct rows** —
+before the fix that was one row and two silently destroyed. No `CLIENT#undefined` or
+`TASK#undefined` remains anywhere.
+
+**Original item below.**
+
 
 `addClient` builds its key with `keys.client(uid, body.id)`
 ([`lambda/src/clients.ts:227`](../../lambda/src/clients.ts#L227)). It validates
@@ -485,7 +501,30 @@ Two lines per handler, no new abstraction. Optionally add
 than merely unlikely — the invoice path already uses exactly that guard, so it is a
 settled pattern here, not a new one.
 
-### FU-EOS-14 · Records without a follow-up or due date are invisible in the default list  → surfaced 2026-08-07 · 🟡 P2
+### FU-EOS-14 · ~~Records without a follow-up or due date are invisible in the default list~~ — RESOLVED 2026-08-07
+
+**Fixed and verified in dev.** Both fields are now defaulted server-side when absent:
+`nextFollowUpDate` to +1 week, `dueDate` to today.
+
+The deciding evidence was that neither field was ever really optional — the app already
+treats both as mandatory everywhere except the API. `ClientModal.tsx:39` defaults
+follow-up to +1 week, `AddTaskModal.tsx:18` defaults due date to today, and both
+`ClientCard.tsx:24` and `TaskItem.tsx:93` call `new Date(...)` on them assuming they
+exist. So the API was the only layer that let the field go missing, and the fix mirrors
+the UI's own defaults rather than inventing a policy.
+
+**Why defaulting and not dropping the index.** Both list screens take their ORDER from
+the sparse index — clients by follow-up date, tasks by due date — and `useTasks` sends
+no sort parameter at all (`_sortBy` is unused), so the server's order is the only order.
+Querying the base table instead would have made every record visible but left both core
+screens in arbitrary key order. Defaulting keeps the ordering, keeps the index, and
+keeps `listTasksByDateRange`'s deliberate calendar behaviour intact.
+
+Verified: a client and a task created with no date both appear in the default list,
+where before the response was `{"clients":[],"count":0}`.
+
+**Original item below.**
+
 
 `GET /clients` defaults to `sortBy = 'nextFollowUpDate'` and therefore queries
 **`GSI1-FollowUpDate`** ([`lambda/src/clients.ts:92`](../../lambda/src/clients.ts#L92)).

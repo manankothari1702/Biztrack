@@ -2,7 +2,7 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import {
     PutCommand, GetCommand, DeleteCommand, QueryCommand, UpdateCommand
 } from '@aws-sdk/lib-dynamodb';
-import { db, TABLE, keys } from './lib/db';
+import { db, TABLE, keys, safeId } from './lib/db';
 import { ok, created, noContent, badRequest, notFound, serverError, forbidden, getUid, resolveCors } from './lib/response';
 import { guardAccount } from './lib/accountGuard';
 import { stripTableKeys } from './lib/sanitize';
@@ -195,6 +195,23 @@ const getClient = async (uid: string, id: string): Promise<APIGatewayProxyResult
     return ok(stripKeys(result.Item));
 };
 
+/**
+ * `nextFollowUpDate` is the sort key of GSI1-FollowUpDate, and the default client
+ * list queries that index. A GSI is SPARSE: DynamoDB does not project an item that
+ * lacks the index sort key. So a client written without a follow-up date existed,
+ * was fetchable by id, and was INVISIBLE in the client list (FU-EOS-14).
+ *
+ * The field was already mandatory everywhere except the API: ClientModal.tsx:39
+ * defaults it to +1 week on every create, and ClientCard.tsx:24 calls
+ * `new Date(client.nextFollowUpDate)` assuming it is there. This makes the API
+ * agree with the model the rest of the app already relies on, and mirrors the
+ * UI's own +1 week so nothing new is invented.
+ */
+const defaultFollowUp = (v: unknown): string =>
+    typeof v === 'string' && v.trim()
+        ? v
+        : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+
 // ── Add client ─────────────────────────────────────────────────────────────
 
 const addClient = async (
@@ -223,12 +240,15 @@ const addClient = async (
         await setClientCount(uid, actual); // drift was high — heal so the user isn't stuck
     }
 
+    const id = safeId(body.id);  // never key off an unvalidated body.id (FU-EOS-13)
     const item = {
         ...body,
-        ...keys.client(uid, body.id),  // keys MUST win — prevents PK/SK override
+        ...keys.client(uid, id),  // keys MUST win — prevents PK/SK override
+        id,                       // echo the resolved id, so a caller that sent none learns it
         clientNameLower: body.clientName.toLowerCase().trim(),
         mobileDigits:    body.mobile.replace(/\D/g, ''),
         createdAt:       body.createdAt ?? new Date().toISOString(),
+        nextFollowUpDate: defaultFollowUp(body.nextFollowUpDate),  // FU-EOS-14
     };
 
     await db.send(new PutCommand({ TableName: TABLE, Item: item }));
@@ -288,11 +308,16 @@ const bulkAdd = async (uid: string, event: APIGatewayProxyEvent): Promise<APIGat
             || !safe.clientName.trim() || !safe.mobile.trim()) {
             return badRequest(`clients[${idx}]: clientName and mobile are required strings`);
         }
+        // Per row, not per batch: without this every id-less row collapsed onto
+        // CLIENT#undefined, so a 500-row import wrote ONE item (FU-EOS-13).
+        const rowId = safeId(safe.id);
         requests.push({ PutRequest: { Item: {
             ...safe,
-            ...keys.client(uid, safe.id),  // keys MUST win
+            ...keys.client(uid, rowId),  // keys MUST win
+            id: rowId,
             clientNameLower: safe.clientName.toLowerCase().trim(),
             mobileDigits:    safe.mobile.replace(/\D/g, ''),
+            nextFollowUpDate: defaultFollowUp(safe.nextFollowUpDate),  // FU-EOS-14
         } } });
     }
 
