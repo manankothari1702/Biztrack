@@ -209,10 +209,14 @@ in the whole baseline with a plausible user-visible bug.
 ### FU-EOS-5 · Stale artefacts still tracked in git  → 🟢 P3
 `.gitignore` now ignores them, but these were already committed and remain in the repo:
 `lint_report.json` (587 KB), `lint_log.txt`, `lint_output.txt`, `output.txt`,
-`repro_bug.ts`, `.firebase/hosting.ZGlzdA.cache` (left over from the pre-AWS backend),
-and two `.docx` interview files. Adoption did **not** delete them — removing files is
-the owner's call, not a side effect of a standards pass. `git rm --cached` whichever
-are genuinely dead.
+`repro_bug.ts` and two `.docx` interview files. Adoption did **not** delete them —
+removing files is the owner's call, not a side effect of a standards pass.
+`git rm --cached` whichever are genuinely dead.
+
+**Partly done 2026-08-07:** `.firebase/hosting.ZGlzdA.cache` and
+`firestore-debug.log` were removed in the Firebase teardown, along with the stale
+`codebase_review.md`. The lint artefacts, `repro_bug.ts` and the `.docx` files are
+untouched and still open.
 
 ### FU-EOS-6 · ~~No monitoring or alerting of any kind~~ — RESOLVED 2026-08-05
 
@@ -387,6 +391,56 @@ more than silence.
 
 ---
 
+### FU-EOS-11 · Firebase project shell still exists  → surfaced 2026-08-07 · 🟡 P2
+
+The Firebase teardown closed the exposure but could not finish the job. **Hosting is
+disabled** (`biztrack-5bf99.web.app` returns 404, was 200) and **Firestore is empty**
+(the `users` collection was deleted; the collection list is now blank). What remains is
+the project shell itself: project **`biztrack-5bf99`**, number **619216241031**.
+
+**Why it was not deleted:** `firebase-tools` has no `projects:delete` command, and
+`gcloud` is not installed on this machine. Project deletion is a Google Cloud console
+action, or `gcloud projects delete biztrack-5bf99` if the SDK is ever installed.
+
+**Still inside it:** 4 Firebase Auth accounts — `1702mkothari@gmail.com`,
+`mananmaheshwari1702@gmail.com`, and two that are **not** the owner's,
+`thakourabhishek@gmail.com` and `atulkothari23@gmail.com`. `firebase-tools` has no bulk
+auth delete, so these go when the project does. They can authenticate, but there is no
+longer an app to load or data to read.
+
+**Why P2 and not P1:** the reachable attack surface is already gone. This is
+housekeeping and a small ongoing bill, not an open door.
+
+**Also worth doing while in the console:** the account holds a second unrelated project,
+`studio-2587205304-c885c` ("Firebase app"), which nothing in Biztrack references.
+
+### FU-EOS-12 · Dev stack exists in code but has never been deployed  → surfaced 2026-08-07 · 🟡 P2
+
+`BiztrackStack-dev` synthesizes cleanly (exit 0, 28 `-dev` resources, 0 reserved
+concurrency, disposable table) but **has never been deployed**. There is therefore still
+no dev environment, and `.env.development.local` still points at production — the exact
+condition FU-B6 exists to end.
+
+**Why it was left:** deploying creates real infrastructure including a CloudFront
+distribution, which is a spend and a footprint decision, not a cleanup side effect.
+
+**To land it:**
+
+```
+cd infra && npx cdk deploy BiztrackStack-dev
+```
+
+Then point `.env.development.local` at the dev stack's outputs (`UserPoolId`,
+`UserPoolClientId`, `CognitoDomain`, `ApiUrl`) and sign up a fresh dev user — the pool
+starts empty, and the PostConfirmation trigger creates the profile.
+
+**Cost:** near zero while idle. DynamoDB is pay-per-request against an empty table and
+Lambda scales to zero; CloudFront and the Cognito domain are the only standing items.
+
+**One rough edge, deliberately left:** the dev stack still carries the WhatsApp scheduler
+(EventBridge, every minute) and the daily purge Lambda. Against an empty table they do
+nothing, but they do invoke. Disable them in dev if the invocation noise ever matters.
+
 ## Group B — deferred backlog (feature/infra work, not gating correctness)
 
 ### FU-B1 · ~~Enable Phase C reserved concurrency~~ — RESOLVED 2026-08-06  → item 3 (B4)
@@ -434,7 +488,27 @@ Item 2 caps photos at 200KB server-side, but they still ride inside every `GET /
 30s poll). S3 + presigned URLs removes the base64-in-DynamoDB class entirely (infra + client
 upload rewrite + migration of existing base64/Google-URL photos).
 
-### FU-B6 · Separate dev stack  → from the C3 CORS lockdown
+### FU-B6 · Separate dev stack  → from the C3 CORS lockdown — **UNBLOCKED 2026-08-07, not yet deployed**
+
+> **2026-08-07 — the parameterization landed; the deploy did not.** Every name in the
+> blocker table below is now suffixed from an `envName` prop on the stack, and
+> `infra/bin/infra.ts` declares both `BiztrackStack` and `BiztrackStack-dev`.
+>
+> **The hazard flagged further down was taken seriously and is cleared.** `env=prod`
+> resolves to an **empty** suffix by construction, so every production name is the
+> byte-identical string it was before. Proof, not intent: `cdk diff BiztrackStack`
+> reports exactly **one** change — `DeletionProtectionEnabled: true` on the table — with
+> **zero replacements and zero physical-name changes**. `cdk synth BiztrackStack-dev`
+> emits 28 correctly `-dev`-suffixed names.
+>
+> Two things the parameterization also fixed, both cross-environment safety rather than
+> naming: the dev pool does not list the production CloudFront origin as an OAuth
+> callback, and dev emits **zero** reserved concurrency — a dev stack reserving 267 would
+> have drawn from the same account pool as prod and could have throttled it.
+>
+> **What remains is the deploy itself**, which creates real resources and is the owner's
+> call. Tracked separately as **FU-EOS-12**. Until then there is still no dev
+> environment and the interim answer below is still the live one.
 
 **Status: deferred, will be implemented.** Not a "maybe" — the current setup has no dev
 environment at all. One CloudFormation stack (`BiztrackStack`), one API Gateway stage (`prod`),

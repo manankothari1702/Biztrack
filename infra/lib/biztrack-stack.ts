@@ -17,16 +17,37 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { execSync } from 'child_process';
 
+/** Which copy of the app this stack is. `prod` holds real data; `dev` is for testing. */
+export type BiztrackEnv = 'prod' | 'dev';
+
+export interface BiztrackStackProps extends cdk.StackProps {
+    /** Defaults to `prod` so an un-parameterised deploy still targets production. */
+    envName?: BiztrackEnv;
+}
+
 export class BiztrackStack extends cdk.Stack {
-    constructor(scope: Construct, id: string, props?: cdk.StackProps) {
+    constructor(scope: Construct, id: string, props?: BiztrackStackProps) {
         super(scope, id, props);
+
+        // ─────────────────────────────────────────────────────────────────────
+        // 0. ENVIRONMENT
+        //    prod takes an EMPTY suffix on purpose: every production resource
+        //    keeps the exact name it already has, so introducing dev cannot
+        //    rename — and therefore cannot replace — anything live.
+        //    dev gets its own table, user pool, functions, API and bucket, so
+        //    local testing can no longer reach production data.
+        // ─────────────────────────────────────────────────────────────────────
+
+        const envName: BiztrackEnv = props?.envName ?? 'prod';
+        const isProd = envName === 'prod';
+        const sfx = isProd ? '' : `-${envName}`;
 
         // ─────────────────────────────────────────────────────────────────────
         // 1. COGNITO — replaces Firebase Auth
         // ─────────────────────────────────────────────────────────────────────
 
         const userPool = new cognito.UserPool(this, 'BiztrackUserPool', {
-            userPoolName: 'biztrack-users',
+            userPoolName: `biztrack-users${sfx}`,
             selfSignUpEnabled: true,
             signInAliases: { email: true },
             autoVerify: { email: true },
@@ -60,7 +81,7 @@ export class BiztrackStack extends cdk.Stack {
 
         const userPoolClient = new cognito.UserPoolClient(this, 'BiztrackWebClient', {
             userPool,
-            userPoolClientName: 'biztrack-web',
+            userPoolClientName: `biztrack-web${sfx}`,
             generateSecret: false, // public SPA client
             authFlows: {
                 userPassword: true,
@@ -70,8 +91,14 @@ export class BiztrackStack extends cdk.Stack {
             oAuth: {
                 flows: { authorizationCodeGrant: true },
                 scopes: [cognito.OAuthScope.EMAIL, cognito.OAuthScope.OPENID, cognito.OAuthScope.PROFILE],
-                callbackUrls: ['http://localhost:5173', 'https://d3o7zfo5sdvcnd.cloudfront.net'],
-                logoutUrls:   ['http://localhost:5173', 'https://d3o7zfo5sdvcnd.cloudfront.net'],
+                // dev never lists the production CloudFront origin: a token issued by
+                // the dev pool must not be redirectable to the production frontend.
+                callbackUrls: isProd
+                    ? ['http://localhost:5173', 'https://d3o7zfo5sdvcnd.cloudfront.net']
+                    : ['http://localhost:5173'],
+                logoutUrls: isProd
+                    ? ['http://localhost:5173', 'https://d3o7zfo5sdvcnd.cloudfront.net']
+                    : ['http://localhost:5173'],
             },
             supportedIdentityProviders: [
                 cognito.UserPoolClientIdentityProvider.COGNITO,
@@ -83,7 +110,7 @@ export class BiztrackStack extends cdk.Stack {
 
         const userPoolDomain = new cognito.UserPoolDomain(this, 'BiztrackDomain', {
             userPool,
-            cognitoDomain: { domainPrefix: 'biztrack-auth' },
+            cognitoDomain: { domainPrefix: `biztrack-auth${sfx}` },
         });
 
         // ─────────────────────────────────────────────────────────────────────
@@ -93,13 +120,17 @@ export class BiztrackStack extends cdk.Stack {
         // ─────────────────────────────────────────────────────────────────────
 
         const table = new dynamodb.Table(this, 'BiztrackTable', {
-            tableName: 'biztrack',
+            tableName: `biztrack${sfx}`,
             partitionKey: { name: 'PK', type: dynamodb.AttributeType.STRING },
             sortKey:      { name: 'SK', type: dynamodb.AttributeType.STRING },
             billingMode:  dynamodb.BillingMode.PAY_PER_REQUEST, // scales to zero
             pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
             timeToLiveAttribute: 'expiresAt', // auto-expire META rate-limit rows; only touches items that have expiresAt
             removalPolicy: cdk.RemovalPolicy.RETAIN,
+            // Production refuses to be deleted at all, even by an explicit API call.
+            // RETAIN only protects against CloudFormation; this protects against a
+            // stray `aws dynamodb delete-table`. dev stays disposable on purpose.
+            deletionProtection: isProd,
         });
 
         // GSI 1: query clients by nextFollowUpDate (due-calls list, dashboard)
@@ -204,7 +235,7 @@ export class BiztrackStack extends cdk.Stack {
         // ─────────────────────────────────────────────────────────────────────
 
         const siteBucket = new s3.Bucket(this, 'BiztrackSiteBucket', {
-            bucketName: `biztrack-frontend-${this.account}`,
+            bucketName: `biztrack-frontend-${this.account}${sfx}`,
             blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
             removalPolicy: cdk.RemovalPolicy.DESTROY,
             autoDeleteObjects: true,
@@ -218,7 +249,7 @@ export class BiztrackStack extends cdk.Stack {
         // only clue is in the browser console. It needs a report-only rollout
         // measured against real traffic first; tracked as FU-EOS-3.
         const securityHeaders = new cloudfront.ResponseHeadersPolicy(this, 'BiztrackSecurityHeaders', {
-            responseHeadersPolicyName: 'biztrack-security-headers',
+            responseHeadersPolicyName: `biztrack-security-headers${sfx}`,
             comment: 'HSTS, nosniff, referrer policy and frame denial for the Biztrack SPA',
             securityHeadersBehavior: {
                 strictTransportSecurity: {
@@ -408,9 +439,17 @@ export class BiztrackStack extends cdk.Stack {
         // Re-tune on TRIGGER, not on a calendar: any per-function Throttles > 0,
         // sustained concurrency above 60% of a reservation, or any change to the API
         // Gateway rate limits below — the two are coupled by the formula above.
+        // The flag now lives in cdk.json context, so it is ON by default and a plain
+        // `cdk deploy` can no longer silently strip the FU-0 reservations.
+        //
+        // dev NEVER reserves, whatever the flag says. Reservations come out of the
+        // account-wide pool: a dev stack claiming 267 would take them from the same
+        // 1,000 production draws on, so dev could throttle prod. That is the exact
+        // interference this environment split exists to prevent.
         const reserveConcurrency =
-            this.node.tryGetContext('reserveConcurrency') === true ||
-            this.node.tryGetContext('reserveConcurrency') === 'true';
+            isProd &&
+            (this.node.tryGetContext('reserveConcurrency') === true ||
+             this.node.tryGetContext('reserveConcurrency') === 'true');
         const rc = (n: number): { reservedConcurrentExecutions?: number } =>
             reserveConcurrency ? { reservedConcurrentExecutions: n } : {};
 
@@ -421,7 +460,7 @@ export class BiztrackStack extends cdk.Stack {
 
         const postConfirmationLambda = new lambda.Function(this, 'PostConfirmationHandler', {
             ...lambdaDefaults,
-            functionName: 'biztrack-post-confirmation',
+            functionName: `biztrack-post-confirmation${sfx}`,
             code: lambdaCode,
             handler: 'dist/cognitoPostConfirmation.handler',
             timeout: cdk.Duration.seconds(10),
@@ -438,7 +477,7 @@ export class BiztrackStack extends cdk.Stack {
         // monitoring token exists in the password manager.
         const healthLambda = new lambda.Function(this, 'HealthHandler', {
             ...lambdaDefaults,
-            functionName: 'biztrack-health',
+            functionName: `biztrack-health${sfx}`,
             code: lambdaCode,
             handler: 'dist/health.handler',
             timeout: cdk.Duration.seconds(5),   // must stay pollable every 30s
@@ -463,7 +502,7 @@ export class BiztrackStack extends cdk.Stack {
         // Clients CRUD
         const clientsLambda = new lambda.Function(this, 'ClientsHandler', {
             ...lambdaDefaults,
-            functionName: 'biztrack-clients',
+            functionName: `biztrack-clients${sfx}`,
             code: lambdaCode,
             handler: 'dist/clients.handler',
             ...rc(50), // expensive (bulk/list) — caps B1/B2 concurrent blast radius
@@ -472,7 +511,7 @@ export class BiztrackStack extends cdk.Stack {
         // Tasks CRUD
         const tasksLambda = new lambda.Function(this, 'TasksHandler', {
             ...lambdaDefaults,
-            functionName: 'biztrack-tasks',
+            functionName: `biztrack-tasks${sfx}`,
             code: lambdaCode,
             handler: 'dist/tasks.handler',
             ...rc(30), // cheap interactive CRUD — generous
@@ -483,7 +522,7 @@ export class BiztrackStack extends cdk.Stack {
         // Product catalogue CRUD + Excel bulk upsert + a product's batches
         const productsLambda = new lambda.Function(this, 'ProductsHandler', {
             ...lambdaDefaults,
-            functionName: 'biztrack-products',
+            functionName: `biztrack-products${sfx}`,
             code: lambdaCode,
             handler: 'dist/products.handler',
             ...rc(30), // bulk import is the heavy path — mirrors clients
@@ -493,7 +532,7 @@ export class BiztrackStack extends cdk.Stack {
         // Every mutation here runs a DynamoDB transaction via lib/stock.ts.
         const batchesLambda = new lambda.Function(this, 'BatchesHandler', {
             ...lambdaDefaults,
-            functionName: 'biztrack-batches',
+            functionName: `biztrack-batches${sfx}`,
             code: lambdaCode,
             handler: 'dist/batches.handler',
             ...rc(20), // interactive, low volume
@@ -502,7 +541,7 @@ export class BiztrackStack extends cdk.Stack {
         // Read-only audit log. No write path exists at all.
         const stockMovementsLambda = new lambda.Function(this, 'StockMovementsHandler', {
             ...lambdaDefaults,
-            functionName: 'biztrack-stock-movements',
+            functionName: `biztrack-stock-movements${sfx}`,
             code: lambdaCode,
             handler: 'dist/stockMovements.handler',
             ...rc(10), // cheapest of the three; one list query
@@ -526,7 +565,7 @@ export class BiztrackStack extends cdk.Stack {
         // Dashboard (counts + lists)
         const dashboardLambda = new lambda.Function(this, 'DashboardHandler', {
             ...lambdaDefaults,
-            functionName: 'biztrack-dashboard',
+            functionName: `biztrack-dashboard${sfx}`,
             code: lambdaCode,
             handler: 'dist/dashboard.handler',
             ...rc(30), // expensive 6-query aggregate; bounded (one per nav)
@@ -538,7 +577,7 @@ export class BiztrackStack extends cdk.Stack {
         // confirmation Cognito trigger.
         const userLambda = new lambda.Function(this, 'UserHandler', {
             ...lambdaDefaults,
-            functionName: 'biztrack-user',
+            functionName: `biztrack-user${sfx}`,
             code: lambdaCode,
             handler: 'dist/user.handler',
             role: adminLambdaRole,
@@ -549,7 +588,7 @@ export class BiztrackStack extends cdk.Stack {
         // WhatsApp daily report scheduler (triggered by EventBridge)
         const whatsappSchedulerLambda = new lambda.Function(this, 'WhatsAppScheduler', {
             ...lambdaDefaults,
-            functionName: 'biztrack-whatsapp-scheduler',
+            functionName: `biztrack-whatsapp-scheduler${sfx}`,
             code: lambdaCode,
             handler: 'dist/whatsappScheduler.handler',
             timeout: cdk.Duration.seconds(120),
@@ -568,7 +607,7 @@ export class BiztrackStack extends cdk.Stack {
         // WhatsApp test (called directly from frontend via API Gateway)
         const whatsappTestLambda = new lambda.Function(this, 'WhatsAppTest', {
             ...lambdaDefaults,
-            functionName: 'biztrack-whatsapp-test',
+            functionName: `biztrack-whatsapp-test${sfx}`,
             code: lambdaCode,
             handler: 'dist/whatsappTest.handler',
             ...rc(5), // already per-user capped (item 1: 10/day, 1/hr); tiny volume
@@ -579,7 +618,7 @@ export class BiztrackStack extends cdk.Stack {
         // batch-delete thousands of rows per account.
         const purgeAccountsLambda = new lambda.Function(this, 'PurgeAccountsHandler', {
             ...lambdaDefaults,
-            functionName: 'biztrack-purge-accounts',
+            functionName: `biztrack-purge-accounts${sfx}`,
             code: lambdaCode,
             handler: 'dist/purgeAccounts.handler',
             timeout: cdk.Duration.minutes(5),
@@ -594,7 +633,7 @@ export class BiztrackStack extends cdk.Stack {
         // ─────────────────────────────────────────────────────────────────────
 
         const schedulerRule = new events.Rule(this, 'WhatsAppSchedulerRule', {
-            ruleName: 'biztrack-whatsapp-every-minute',
+            ruleName: `biztrack-whatsapp-every-minute${sfx}`,
             schedule: events.Schedule.rate(cdk.Duration.minutes(1)),
         });
         schedulerRule.addTarget(new targets.LambdaFunction(whatsappSchedulerLambda));
@@ -602,7 +641,7 @@ export class BiztrackStack extends cdk.Stack {
         // Daily account purge — runs at 03:00 UTC to permanently delete accounts
         // whose 7-day recovery window has expired.
         const purgeRule = new events.Rule(this, 'PurgeAccountsRule', {
-            ruleName: 'biztrack-purge-accounts-daily',
+            ruleName: `biztrack-purge-accounts-daily${sfx}`,
             schedule: events.Schedule.cron({ minute: '0', hour: '3' }),
         });
         purgeRule.addTarget(new targets.LambdaFunction(purgeAccountsLambda));
@@ -614,12 +653,12 @@ export class BiztrackStack extends cdk.Stack {
 
         const cognitoAuthorizer = new apigateway.CognitoUserPoolsAuthorizer(this, 'CognitoAuth', {
             cognitoUserPools: [userPool],
-            authorizerName: 'biztrack-cognito-auth',
+            authorizerName: `biztrack-cognito-auth${sfx}`,
             identitySource: 'method.request.header.Authorization',
         });
 
         const api = new apigateway.RestApi(this, 'BiztrackApi', {
-            restApiName: 'biztrack-api',
+            restApiName: `biztrack-api${sfx}`,
             description: 'Biztrack CRM REST API',
             defaultCorsPreflightOptions: {
                 allowOrigins: allowedOrigins, // audit C3 — allowlist, not '*' (env-aware; see above)
@@ -844,7 +883,7 @@ export class BiztrackStack extends cdk.Stack {
         // subscription is missing OR unconfirmed, because an unconfirmed
         // subscription accepts alarms and throws them away.
         const alertsTopic = new sns.Topic(this, 'BiztrackAlerts', {
-            topicName:   'biztrack-alerts',
+            topicName:   `biztrack-alerts${sfx}`,
             displayName: 'Biztrack alerts',
         });
 
@@ -869,7 +908,7 @@ export class BiztrackStack extends cdk.Stack {
         // silently blind a Stage-scoped alarm and nothing would say so.
         // Threshold 1 — at 0-444 requests/day, one server error IS the incident.
         alarm('ApiServerErrorAlarm', {
-            alarmName: 'biztrack-api-5xx',
+            alarmName: `biztrack-api-5xx${sfx}`,
             alarmDescription:
                 'API Gateway returned a 5XX, so a signed-in user just saw a server error. '
                 + 'Open the biztrack dashboard and read the per-function Lambda errors graph '
@@ -903,7 +942,7 @@ export class BiztrackStack extends cdk.Stack {
         // per-function alarms plus an error-RATE alarm. Recorded in docs/RULES.md
         // so the number has an owner instead of quietly rotting.
         alarm('LambdaErrorsAlarm', {
-            alarmName: 'biztrack-lambda-errors',
+            alarmName: `biztrack-lambda-errors${sfx}`,
             alarmDescription:
                 'A Lambda function raised an error. This covers scheduled and async work that '
                 + 'never reaches API Gateway, including the WhatsApp scheduler, the daily purge '
@@ -930,7 +969,7 @@ export class BiztrackStack extends cdk.Stack {
         // fires identically for both. The description carries the split because the
         // description is the runbook somebody reads at 3am.
         alarm('LambdaThrottlesAlarm', {
-            alarmName: 'biztrack-lambda-throttles',
+            alarmName: `biztrack-lambda-throttles${sfx}`,
             alarmDescription:
                 'A Lambda invocation was throttled. Since FU-0 this means one of two different '
                 + 'things, and this alarm cannot tell them apart because it is account-wide. '
@@ -975,7 +1014,7 @@ export class BiztrackStack extends cdk.Stack {
         });
 
         alarm('DynamoThrottleAlarm', {
-            alarmName: 'biztrack-dynamodb-throttles',
+            alarmName: `biztrack-dynamodb-throttles${sfx}`,
             alarmDescription:
                 'DynamoDB throttled a read or a write on the biztrack table. On an on-demand '
                 + 'table this means a hot partition or a burst above the current scaling '
@@ -1007,7 +1046,7 @@ export class BiztrackStack extends cdk.Stack {
         // false-positive, and it fires about 33h after a genuine stoppage. A
         // daily housekeeping job does not need to be caught faster than that.
         alarm('PurgeNotRunningAlarm', {
-            alarmName: 'biztrack-purge-not-running',
+            alarmName: `biztrack-purge-not-running${sfx}`,
             alarmDescription:
                 'biztrack-purge-accounts has not run for over 30 hours. It is scheduled daily at '
                 + '03:00 UTC. Accounts past their 7 day recovery window are no longer being '
@@ -1038,7 +1077,7 @@ export class BiztrackStack extends cdk.Stack {
         ];
 
         const dashboard = new cloudwatch.Dashboard(this, 'BiztrackDashboard', {
-            dashboardName:   'biztrack',
+            dashboardName:   `biztrack${sfx}`,
             defaultInterval: cdk.Duration.days(7),
         });
 

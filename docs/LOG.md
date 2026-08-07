@@ -999,3 +999,123 @@ no per-function caps *and* a front door four times wider than the one that was
 compensating for their absence. The flag alone is not a rollback.
 
 ---
+
+## [2026-08-07] — Environment reset: Firebase torn down, all data wiped, dev split from prod
+
+**Why.** The owner wanted a genuinely fresh start: no demo data anywhere, a small empty
+dev environment for testing, and Firebase gone for good. The audit that opened this work
+found something nobody was looking for, so the shape of the job changed.
+
+### The finding that mattered
+
+**The pre-AWS Firebase app was still live and publicly serving.**
+`https://biztrack-5bf99.web.app` returned HTTP 200. The bundle it served was the
+*original Firebase build* — it contained the Firebase web API key, `biztrack-5bf99`,
+`firebaseapp.com`, `firestore.googleapis.com` and four `identitytoolkit` references, and
+**zero** references to `execute-api`, `cognito-idp` or `amazonaws`. It had no knowledge
+of AWS at all.
+
+That is not a stale link. It was a second, fully working front door into a live Firestore
+database, with its own auth, running continuously since the migration and behind
+credentials nobody had rotated. Firebase Auth held **four** accounts, two of which
+(`thakourabhishek@gmail.com`, `atulkothari23@gmail.com`) are not the owner's.
+
+Nothing in the repo pointed at it. `package.json` has no Firebase dependency and no
+source file imports one — the migration cleaned the *code* and left the *deployment*
+running. Worth remembering: a clean grep is not evidence that a backend is gone.
+
+### What was done
+
+**P0 — Firebase.** `firebase hosting:disable` first, to shut the public door before
+anything else; the site went to **404**. Then `firestore:delete --all-collections`
+removed the `users` collection; a second run lists no collections. The Auth export was
+inspected to count accounts and **deleted immediately** — it carries password hashes.
+
+⚠ **The Firebase project shell still exists.** `firebase-tools` has no
+`projects:delete`, and `gcloud` is not installed on this machine. Hosting is off,
+Firestore is empty, and the app that used them is gone, so the exposure is closed — but
+deleting project `biztrack-5bf99` (number 619216241031) is a console action still
+outstanding. **Tracked as FU-EOS-11.**
+
+**P0 — data.** An on-demand backup (`biztrack-pre-wipe-20260807`, 91,580 bytes, matching
+the table byte-for-byte) was taken first, because PITR is enabled but §10 records that a
+restore has **never been tested** — that is an unverified safety net, and this was the
+one irreversible step. Then all **246** items were deleted in 10 batches; a follow-up
+scan returns `Count: 0`. All **3** Cognito users were deleted. The pool itself, the
+table, its six GSIs, PITR, every Lambda, the API and all buckets were left untouched.
+
+Deleted: 59 clients, 57 products, 101 batches, 6 invoices, 12 stock movements, 2 invoice
+counters, 2 org roots, 1 task, 5 profiles (2 of them orphans with no Cognito user) and
+the `verify-deploy-synthetic-uid` META row, which verification regenerates.
+
+**P1 — dev/prod split.** §6 said it plainly: *"local development runs against the
+production table."* That is how demo data reached production, and wiping without fixing
+it would only have reset the clock. Every resource name was hardcoded, so the stack now
+takes an `envName` prop. **prod takes an empty suffix on purpose** — every production
+resource keeps the name it already had, so introducing dev cannot rename or replace
+anything live. `cdk diff BiztrackStack` proves it: **one line, `DeletionProtectionEnabled:
+true`**, nothing else. `BiztrackStack-dev` synthesizes 28 resources all suffixed `-dev`.
+
+**P1 — safeguards.** Production's table now has `deletionProtection` (applied live and
+declared in CDK, so they agree). The dev user pool does **not** list the production
+CloudFront origin in its callback URLs — a dev token must not be redirectable to the
+production frontend.
+
+### A latent bug found on the way, and fixed
+
+The first `cdk diff` showed something that had nothing to do with this work: deploying
+would have **stripped `ReservedConcurrentExecutions` from all twelve functions**, silently
+undoing FU-0 from the day before. The reservations were gated behind
+`-c reserveConcurrency=true`, a flag that lived only in the operator's shell history —
+so **any** future `cdk deploy` would have reverted them.
+
+The flag now lives in `cdk.json` context, on by default. It is additionally gated on
+`isProd`: reservations come out of the account-wide pool, so a dev stack claiming 267
+would take them from the same 1,000 production draws on — dev could have throttled prod.
+That is precisely the interference this split exists to prevent. After the fix, prod
+diffs to the single deletion-protection line and dev synthesizes **zero** reservations.
+
+**Note for FU-0's rollback paragraph above:** it says the flag alone is not a rollback.
+That is still true, and the flag is no longer something you can forget — but it now also
+means a `cdk.json` edit changes production concurrency. Treat that line as load-bearing.
+
+**P3 — repo.** Removed the tracked `.firebase/hosting.ZGlzdA.cache`, `firestore-debug.log`
+(77 KB), the three Firebase entries in `.claude/settings.local.json`, the dead
+`firebase.ts` entry in `verify_dates.ts`, and the Firestore `Timestamp` shim in
+`excelUtils.ts` — a wipe of every pre-AWS record makes that branch unreachable, which
+retires its "Do not remove" comment. Deleted `codebase_review.md`, a review of the
+Firebase codebase that described the app as "React 19, **Firebase**, Tailwind" and was
+actively misleading; it is recoverable with `git show HEAD:codebase_review.md`.
+`product_requirements_document.md` was **not** rewritten — its 15 Firestore references
+are inside requirement statements, and silently converting them to AWS wording would
+have invented requirements. It carries a historical banner pointing at `docs/PROJECT.md`
+instead. Comments in `biztrack-stack.ts` ("COGNITO — replaces Firebase Auth") and the
+`LOG.md` history are accurate and were left alone.
+
+### Verified
+
+- [x] `https://biztrack-5bf99.web.app` → **404** (was 200)
+- [x] Firestore collection list **empty** (was `users`)
+- [x] `scan --select COUNT` on `biztrack` → **`Count: 0`**
+- [x] `list-users` → **`[]`**; user pool `ap-south-1_2QhXH4Xjd` still present
+- [x] Backup `biztrack-pre-wipe-20260807` **AVAILABLE**, 91,580 bytes
+- [x] `deletionProtection` **true** on the production table
+- [x] `cdk diff BiztrackStack` → one in-place change, **zero replacements**
+- [x] `cdk synth BiztrackStack-dev` → exit 0, 28 `-dev` names, **0** reservations
+- [x] `./verify.sh` **GREEN** end to end, including the live deployed-stack checks
+
+### Not done, deliberately
+
+**Neither stack was deployed.** `deletionProtection` was applied with the API directly,
+so production already has it and its diff is now cosmetic. `BiztrackStack-dev` exists
+only as code — it has never been deployed, so **there is no dev environment yet**, and
+`.env.development.local` still points at production. Deploying it creates real resources
+(a CloudFront distribution among them) and is the owner's call, not a side effect of a
+cleanup. **Tracked as FU-EOS-12.**
+
+The dev stack also carries the WhatsApp scheduler and the daily purge Lambda, which will
+tick against an empty table. Harmless with no clients, but it is a real EventBridge rule
+firing every minute in an environment meant to be idle — worth disabling in dev if the
+noise or the invocation count ever matters.
+
+---
