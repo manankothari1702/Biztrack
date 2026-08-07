@@ -1119,3 +1119,96 @@ firing every minute in an environment meant to be idle — worth disabling in de
 noise or the invocation count ever matters.
 
 ---
+
+## [2026-08-07] — Dev environment deployed and validated; two latent write-path bugs found
+
+**Why.** FU-EOS-12 left the dev stack as code that had never run. Until it was deployed
+and proven, "development is separated from production" was a claim, not a fact.
+
+### Deployed
+
+`BiztrackStack-dev`, `CREATE_COMPLETE` in **319s**, 68 resources, no failures and no
+rollback. Prod was not in the deploy at all — a separate stack, deployed by name.
+
+| | |
+|---|---|
+| Table | `biztrack-dev` |
+| User pool | `ap-south-1_2i6e273DD` |
+| API | `https://gkat4p5bje.execute-api.ap-south-1.amazonaws.com/prod` |
+| CloudFront | `https://d2938bm9xnbgsq.cloudfront.net` |
+
+Both environments finished **empty**: dev 0 items / 0 users, prod 0 items / 0 users. The
+smoke-test rows and accounts were deleted after validation — they are exactly the demo
+data this work exists to remove.
+
+### The five flows, verified against dev
+
+**12 checks, 0 failures.** Sign up (the PostConfirmation trigger created the `PROFILE`
+row in `biztrack-dev`), login, create client, create task, logout, plus an
+unauthenticated `GET /clients` returning **401**. Logout is asserted as the revoked
+refresh token no longer minting tokens — `global-sign-out` revokes access and refresh
+tokens, but an already-issued idToken stays valid until expiry, and the idToken is what
+the API accepts ([`apiService.ts:33`](../src/shared/services/apiService.ts#L33)). Full
+logout also depends on the client clearing its own tokens, which is UI behaviour.
+
+The script refuses to run unless it resolves `biztrack-dev`, and aborts outright on the
+production pool id or the production API id. It is a validation tool, not a fixture, and
+it lives in scratch — it is not part of the repo or of `verify.sh`.
+
+### Three real bugs, none of them caused by this work
+
+**1. The server takes an item's primary key from the request body, unvalidated
+(FU-EOS-13, P1).** `keys.client(uid, body.id)` validates `clientName` and `mobile` but
+never `id`. A `POST /clients` with no `id` returned **201** and wrote
+`SK = "CLIENT#undefined"`. The write is a bare `PutCommand`, so a second such request
+**silently overwrites the first** — two clients collapse into one row, 201 both times,
+and with no soft delete and no audit trail for client edits (§7) that loss is
+unrecoverable and invisible. Not reachable through the SPA, which generates a UUID per
+record; reachable by anything else holding a valid token.
+
+**2. Records without a follow-up or due date are invisible in the default list
+(FU-EOS-14, P2).** `GET /clients` defaults to `sortBy = 'nextFollowUpDate'` and queries
+`GSI1-FollowUpDate`, whose sort key is that field. DynamoDB does not project an item
+into an index when the item lacks the index's sort key, so a client written without a
+follow-up date exists, is fetchable by id, and **does not appear in the client list**.
+Fifteen seconds of retries ruled out eventual consistency. `GET /tasks` is identical via
+`GSI2-TaskStatus` / `dueDate`. Latent through the UI — `ClientModal.tsx:39` defaults the
+follow-up to +1 week — and live at the API boundary. The index is behaving correctly;
+nothing enforces the field it depends on.
+
+Both share one root cause worth naming: **the server trusts the client to supply fields
+the read path depends on.** Neither is a dev-environment artefact; both are in
+production code today.
+
+**3. `npm run dev` could not be pointed away from production (FU-EOS-15, fixed).**
+`vite.config.ts` read `VITE_API_PROXY_TARGET` from `process.env`, and **Vite never
+copies `.env` files into `process.env`** — so the documented override was invisible and
+only worked as a shell variable. `.env.development.local` compounded it by overriding
+only `VITE_API_URL`, leaving every `VITE_COGNITO_*` value to fall through to `.env`.
+Local development was authenticating against the **production user pool**. Fixed with
+`loadEnv`, and the default proxy target is now the dev API: the proxy runs only under
+`npm run dev`, production builds use the absolute URL from `.env` and never touch it, so
+reaching production from localhost should be a deliberate override rather than an
+omission.
+
+That last one matters more than its size. The dev stack could have been deployed
+perfectly and `npm run dev` would still have talked to production.
+
+### Verified
+
+- [x] `BiztrackStack-dev` `CREATE_COMPLETE`, 68 resources, 319s
+- [x] 12/12 validation checks pass against dev
+- [x] dev **0 items / 0 users**; prod **0 items / 0 users**
+- [x] `./verify.sh` **GREEN**, including the production build with the new Vite config
+
+### Not done
+
+The five flows were exercised at the **API** level, not through the browser. They prove
+the foundation — auth, the trigger, both write paths, the read paths and sign-out — but
+not the UI. A browser pass against dev is worth doing before trusting the frontend
+against the new pool.
+
+FU-EOS-13 and FU-EOS-14 are **recorded, not fixed**. They are pre-existing and latent
+through the UI, and fixing them is application work, not environment work.
+
+---

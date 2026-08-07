@@ -1,4 +1,5 @@
 import { defineConfig } from 'vitest/config'
+import { loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
@@ -17,31 +18,44 @@ import tailwindcss from '@tailwindcss/vite'
 // in dev; `.env` keeps the absolute prod URL, so production builds are
 // completely unaffected.
 //
-// The target cannot be read back from VITE_API_URL here: `.env.local` overrides
-// that to `/api`, which is precisely the value that must not be the target.
-// Override with VITE_API_PROXY_TARGET if the API URL ever changes.
-const API_PROXY_TARGET =
-  process.env.VITE_API_PROXY_TARGET
-  ?? 'https://jklolwtrlg.execute-api.ap-south-1.amazonaws.com/prod'
+// The target cannot be read back from VITE_API_URL here: `.env.development.local`
+// overrides that to `/api`, which is precisely the value that must not be the target.
+// Set VITE_API_PROXY_TARGET in `.env.development.local` to point at another stack.
+//
+// It must be read with loadEnv, NOT process.env: Vite does not copy `.env` files
+// into process.env, so a value set there is invisible to this config file. Before
+// this, VITE_API_PROXY_TARGET only worked as a real shell variable — which is why
+// local development had no practical way to stop targeting production.
+//
+// The DEFAULT is now the dev API, not prod. This proxy runs only under `npm run
+// dev`; production builds use the absolute VITE_API_URL from `.env` and never
+// touch it. So the safe default is the empty dev stack: reaching production from
+// localhost should take a deliberate override, not an omission.
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), '')
+  const API_PROXY_TARGET =
+    process.env.VITE_API_PROXY_TARGET
+    ?? env.VITE_API_PROXY_TARGET
+    ?? 'https://gkat4p5bje.execute-api.ap-south-1.amazonaws.com/prod'  // BiztrackStack-dev
 
-// https://vite.dev/config/
-export default defineConfig({
-  plugins: [react(), tailwindcss()],
-  server: {
-    proxy: {
-      '/api': {
-        target: API_PROXY_TARGET,
-        // Rewrites the Host header to the API Gateway host. Without it API
-        // Gateway receives Host: localhost:5173 and rejects the request.
-        changeOrigin: true,
-        // Strip the /api marker; the target already carries the /prod stage,
-        // so /api/products is forwarded as /prod/products.
-        rewrite: (path) => path.replace(/^\/api/, ''),
+  return {
+    plugins: [react(), tailwindcss()],
+    server: {
+      proxy: {
+        '/api': {
+          target: API_PROXY_TARGET,
+          // Rewrites the Host header to the API Gateway host. Without it API
+          // Gateway receives Host: localhost:5173 and rejects the request.
+          changeOrigin: true,
+          // Strip the /api marker; the target already carries the /prod stage,
+          // so /api/products is forwarded as /prod/products.
+          rewrite: (path: string) => path.replace(/^\/api/, ''),
+        },
       },
     },
-  },
-  test: {
-    environment: 'node',
-    include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
-  },
+    test: {
+      environment: 'node',
+      include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
+    },
+  }
 })

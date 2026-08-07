@@ -414,7 +414,24 @@ housekeeping and a small ongoing bill, not an open door.
 **Also worth doing while in the console:** the account holds a second unrelated project,
 `studio-2587205304-c885c` ("Firebase app"), which nothing in Biztrack references.
 
-### FU-EOS-12 · Dev stack exists in code but has never been deployed  → surfaced 2026-08-07 · 🟡 P2
+### FU-EOS-12 · ~~Dev stack exists in code but has never been deployed~~ — RESOLVED 2026-08-07
+
+**Deployed.** `BiztrackStack-dev`, `CREATE_COMPLETE` in 319s, 68 resources. Table
+`biztrack-dev`, pool `ap-south-1_2i6e273DD`, API
+`https://gkat4p5bje.execute-api.ap-south-1.amazonaws.com/prod`, CloudFront
+`https://d2938bm9xnbgsq.cloudfront.net`. Both environments are **empty**: dev 0 items /
+0 users, prod 0 items / 0 users.
+
+All five foundation flows verified against dev — sign up (with the PostConfirmation
+trigger creating the `PROFILE` row), login, create client, create task, logout — plus
+that an unauthenticated `GET /clients` returns 401. **12 checks, 0 failures.** The run
+is guarded: it aborts if it resolves the production pool id, the production API id, or
+any table other than `biztrack-dev`.
+
+`.env.development.local` now points at the dev stack. That mattered more than expected —
+see FU-EOS-15.
+
+**Original item, kept for context:**
 
 `BiztrackStack-dev` synthesizes cleanly (exit 0, 28 `-dev` resources, 0 reserved
 concurrency, disposable table) but **has never been deployed**. There is therefore still
@@ -440,6 +457,78 @@ Lambda scales to zero; CloudFront and the Cognito domain are the only standing i
 **One rough edge, deliberately left:** the dev stack still carries the WhatsApp scheduler
 (EventBridge, every minute) and the daily purge Lambda. Against an empty table they do
 nothing, but they do invoke. Disable them in dev if the invocation noise ever matters.
+
+### FU-EOS-13 · The server takes an item's primary key from the request body, unvalidated  → surfaced 2026-08-07 · 🔴 P1
+
+`addClient` builds its key with `keys.client(uid, body.id)`
+([`lambda/src/clients.ts:227`](../../lambda/src/clients.ts#L227)). It validates
+`clientName` and `mobile`, but **never validates `id`**. `POST /clients` with no `id`
+returns **201** and writes `SK = "CLIENT#undefined"`. `POST /tasks` behaves the same way.
+
+Found by sending the dev smoke-test request without an `id` — the row landed as
+`CLIENT#undefined` and the API reported success.
+
+**Why it is P1 and not cosmetic:** the write is a plain `PutCommand` with no
+`attribute_not_exists` condition, so **a second such request silently overwrites the
+first**. Two different clients collapse into one row and the earlier one is gone, with a
+201 both times. Given `PROJECT.md` §7 already records there is no soft delete and no
+audit trail for client edits, that loss is unrecoverable and invisible.
+
+**Not currently reachable through the UI** — the SPA generates a UUID per record — so
+this is latent, not a live incident. It is reachable by anything else holding a valid
+token: a script, a retry with a mangled payload, or a future integration.
+
+**Simplest fix, in keeping with the app:** reject a missing or non-UUID `id` with the
+existing `badRequest`, in the same block that already checks `clientName` and `mobile`.
+Two lines per handler, no new abstraction. Optionally add
+`ConditionExpression: attribute_not_exists(PK)` to make an overwrite impossible rather
+than merely unlikely — the invoice path already uses exactly that guard, so it is a
+settled pattern here, not a new one.
+
+### FU-EOS-14 · Records without a follow-up or due date are invisible in the default list  → surfaced 2026-08-07 · 🟡 P2
+
+`GET /clients` defaults to `sortBy = 'nextFollowUpDate'` and therefore queries
+**`GSI1-FollowUpDate`** ([`lambda/src/clients.ts:92`](../../lambda/src/clients.ts#L92)).
+That index's sort key is `nextFollowUpDate`. DynamoDB does not project an item into an
+index when the item lacks that index's sort key — a **sparse index** — so a client
+written without a follow-up date exists in the table, is fetchable by id, and is
+**absent from the default client list**. `GET /tasks` has the identical shape via
+`GSI2-TaskStatus`, whose sort key is `dueDate`.
+
+Found in dev: `POST /clients` returned 201, `get-item` confirmed the row, and
+`GET /clients` returned `{"clients":[],"count":0}` — for fifteen seconds of retries, so
+this is not eventual consistency.
+
+**Latent through the UI, live at the API.** `ClientModal.tsx:39` defaults the follow-up
+date to +1 week, so records created in the app always carry one. Anything that writes
+without it produces a row the owner cannot see — including a future import path or
+integration.
+
+**Fix options, cheapest first:**
+1. Require `nextFollowUpDate` / `dueDate` server-side, the same way FU-EOS-13 should
+   require `id`. Keeps the fast GSI query and makes the invariant explicit.
+2. Default the field server-side when absent, so the index always has a key.
+3. Fall back to the base-table query when the field is missing. Correct but slower and
+   more code — the least attractive of the three.
+
+Do **not** treat this as an index bug. The index is doing what a sparse index does; the
+gap is that nothing enforces the field the index depends on.
+
+### FU-EOS-15 · ~~`npm run dev` could not be pointed away from production~~ — RESOLVED 2026-08-07
+
+`vite.config.ts` read `VITE_API_PROXY_TARGET` from `process.env`. **Vite does not copy
+`.env` files into `process.env`**, so that documented override was invisible to the
+config and only ever worked as a real shell variable. In practice `npm run dev` was
+hardwired to the production API.
+
+`.env.development.local` compounded it: it overrode only `VITE_API_URL`, so every
+`VITE_COGNITO_*` value fell through to `.env` — production. Local development
+authenticated against the **production user pool**.
+
+Fixed by reading the value with `loadEnv`, and by **flipping the default target to the
+dev API**. The proxy runs only under `npm run dev`; production builds use the absolute
+`VITE_API_URL` from `.env` and never touch it. Reaching production from localhost should
+be a deliberate override, not an omission.
 
 ## Group B — deferred backlog (feature/infra work, not gating correctness)
 
