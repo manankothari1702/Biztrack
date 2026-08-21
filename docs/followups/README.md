@@ -138,17 +138,27 @@ write, `is_deleted = false` on every read path **including totals and Excel expo
 and a test that a deleted record is genuinely hidden from a list, a count and an
 export. The dashboard aggregates are the easiest place to get this wrong.
 
-### FU-EOS-2 · A DynamoDB restore has never been tested  → PROJECT.md §10 · 🔴 P1
-PITR is enabled and the table is `RETAIN`, so the backup side is sound. Nobody has ever
-restored from it. **An unrestored backup is a file, not a safety net** — the failure
-mode is discovering at the worst possible moment that the restore path has a step
-nobody knows.
+### FU-EOS-2 · ~~A DynamoDB restore has never been tested~~ — RESOLVED 2026-08-21
 
-Owner action, roughly an hour: restore the table to a new name at a timestamp a few
-minutes old, point nothing at it, confirm a handful of known rows are present, then
-delete the restored table. Record the date in `docs/PROJECT.md` §10 — the field is
-deliberately marked 🔴 NEVER until this happens.
+**Restore drill run against account `346299179287` / ap-south-1.** `biztrack` restored
+by PITR to a scratch table `biztrack-restore-test`, timestamp ~15 minutes old, using
+`restore-table-to-point-in-time`.
 
+**The number nobody had: 4m31s** from API call to `TableStatus = ACTIVE` (±15s, the
+poll interval). That is this app's real recovery time objective. All six GSIs came
+back `ACTIVE`. Scratch table deleted and confirmed gone; both live tables untouched.
+
+**The drill did not prove what it looks like it proved, and that matters.** A live
+scan of `biztrack` returned `Count: 0` — the production table is empty, so restoring
+it verified the mechanism and nothing about data fidelity. Passing the gate on that
+alone would have been the false confidence the 2026-08-07 LOG entry warns about.
+Fidelity was therefore proved separately on `biztrack-dev`: **14/14 items restored**,
+keys well-formed (`PROFILE`, `CLIENT#<uuid>`, `TASK#<uuid>`, `ORG#root`) and matching
+the §4 model.
+
+Recorded in `docs/PROJECT.md` §10. `verify.sh` re-checks the date and fails again if
+it ages past 180 days, so this re-runs roughly twice a year via
+`docs/drills/P0-DRILL-PROMPT.md`. Surfaced FU-EOS-21.
 ### FU-EOS-3 · No Content-Security-Policy  → PROJECT.md §8 D-05 · 🟡 P2
 The AI-EOS adoption added HSTS, `X-Content-Type-Options`, a referrer policy and
 `X-Frame-Options` to the CloudFront distribution, which previously set **no security
@@ -273,7 +283,30 @@ there: correcting an unrelated document is not a side effect a health-gate commi
 should carry. Verify the intended canonical URL with the owner before editing —
 this records which URL git uses, not which one is meant to be permanent.
 
-### FU-EOS-8 · No `.gitattributes`, so a fresh clone cannot run `./verify.sh`  → surfaced 2026-08-06 · 🟡 P2
+### FU-EOS-8 · No `.gitattributes`, so a fresh clone cannot run `./verify.sh`  → surfaced 2026-08-06 · 🟡 P2 · **PARTIALLY RESOLVED 2026-08-07**
+
+> **2026-08-07.** `.gitattributes` written: `* text=auto` plus explicit `eol=lf`
+> on `*.sh`, `*.bash`, `.githooks/*` and `verify.sh` by name, `eol=crlf` on
+> Windows script types, and `binary` on the image/office/font extensions. That
+> closes the CRLF half — a Windows checkout with `core.autocrlf=true` no longer
+> produces `#!/usr/bin/env bash\r` and the `bad interpreter` error that names
+> neither line endings nor the cause.
+>
+> **The permission half is still open and needs the owner.** Confirmed by
+> `git ls-files -s`: both files are mode `100644`, not `100755`, so a fresh
+> clone on Linux or CI gets a non-executable gate and `./verify.sh` fails with
+> `Permission denied`. Fix, once, from a working tree with write access:
+>
+> ```
+> git update-index --chmod=+x verify.sh .githooks/pre-commit
+> git commit -m "chore: mark verify.sh and the pre-commit hook executable"
+> ```
+>
+> The CI workflow `chmod +x`es defensively so it is not blocked on this, but a
+> human cloning the repo still is. **Acceptance:** `git ls-files -s verify.sh`
+> reports `100755`, and `git clone <repo> scratch && cd scratch && ./verify.sh
+> --fast` runs without a manual `chmod`.
+
 
 **The release gate is not reliably runnable from a fresh clone.** Two independent
 causes, both invisible on the machine the repo was built on.
@@ -582,6 +615,105 @@ place for that care to be missing.
 
 **Cosmetic, and deliberately not chased** — it misleads slightly on one dashboard card
 and touches no stored value. Fix it when someone is already in that formatter.
+
+### FU-EOS-18 · Alarm delivery has never been proven end to end  → surfaced 2026-08-07 · 🔴 P0
+
+FU-EOS-6 built the monitoring and is correctly closed: five alarms exist, all notify
+`biztrack-alerts` on alarm **and** on OK, and `infra/test/infra.test.ts` asserts the
+shape. **What was never done is confirming an alarm reaches a human inbox.**
+
+By `BR-BIZ-E05` the SNS subscription is deliberately not in the stack, so nothing in
+CDK or in the test suite can prove it exists. `verify.sh` checks it and *skips* when
+the AWS CLI is unavailable. The rule's own wording is the risk: *"An unconfirmed
+subscription accepts every alarm and discards it, which looks configured and is worse
+than nothing."*
+
+**Owner action, ~15 minutes.**
+
+- `aws sns list-subscriptions-by-topic --topic-arn <biztrack-alerts>` — confirm
+  `SubscriptionArn` is a real ARN, **not** `PendingConfirmation`.
+- Force one alarm into ALARM (`aws cloudwatch set-alarm-state`), confirm the mail
+  arrives, confirm the OK notification arrives too.
+- **Acceptance:** a dated line in `docs/LOG.md` naming the alarm fired and the address
+  that received it. Until that line exists, this app is unmonitored in the only sense
+  that matters.
+
+### FU-EOS-19 · No CloudWatch log retention — logs outlive the accounts they describe  → surfaced 2026-08-07 · 🟡 P1
+
+`grep -rn "logRetention\|RetentionDays\|logGroup" infra/lib/biztrack-stack.ts` returns
+**nothing**. `lambdaDefaults` (`biztrack-stack.ts:406-413`) sets runtime, role, timeout,
+memory and environment, and no retention — so all fourteen log groups keep everything
+forever, at AWS's default.
+
+**This is not primarily a cost item.** `PROJECT.md` §10 promises `PENDING_DELETION`
+accounts are purged by a daily Lambda. That Lambda deletes DynamoDB items and cannot
+touch CloudWatch, so a purged user's `uid` — and whatever the handlers logged beside it
+— persists indefinitely in a system nothing prunes. The documented retention policy and
+the actual retention differ.
+
+- Add `logRetention: logs.RetentionDays.THREE_MONTHS` (or whatever §10 should say) to
+  `lambdaDefaults` — one line, applies to all fourteen functions.
+- Add an assertion to `infra/test/infra.test.ts` in the style of the existing alarm
+  assertions, so it cannot silently regress.
+- Reconcile the number with `PROJECT.md` §10 so the doc and the stack agree.
+- **Acceptance:** `cdk diff` shows retention added and nothing else; `infra/` suite
+  green; §10 states the same number the stack sets.
+
+### FU-EOS-20 · No CI — every gate depends on a human remembering  → surfaced 2026-08-07 · 🟡 P1
+
+`PROJECT.md` §7: *"No CI. Tests and lint run only when a human runs them."* No
+`.github/workflows/` exists. The pre-commit hook (FU-EOS-4, closed at `721a767`) is a
+real improvement but is bypassable with `--no-verify` and never runs on a pull request.
+
+The argument is historical, not hypothetical: §7 also recorded that `npm run lint` was
+*"red (15 errors) and has been for some time."* That regression is fixed, but it
+persisted precisely because nothing enforced the gate. `verify.sh` is a good gate —
+40-plus checks, and the `infra/` suite alone asserts 56 properties — and its value is
+proportional to how reliably it runs.
+
+- One GitHub Actions workflow: `./verify.sh --fast` on every push, full `./verify.sh`
+  on `main`. The script already exits 1 correctly (`verify.sh:316`), so this is a few
+  lines.
+- Note the workflow needs `npm ci`, not the committed `node_modules` — see FU-EOS-8.
+- **Acceptance:** push a deliberate failure and confirm the workflow goes red.
+
+**Written 2026-08-07 — `.github/workflows/verify.yml`.** Two jobs. `gate` runs
+`./verify.sh --fast` on every PR and push with no AWS credentials; `full` runs the
+complete script on `main` only, with read-only AWS access via OIDC. The split is a
+security boundary: `pull_request` from a fork gets no secrets by design, so a
+single full job would fail on every fork PR, and the usual "fix" —
+`pull_request_target` — runs fork code *with* secrets in scope. Node is pinned to
+24 to match `NODEJS_24_X`. All three lockfiles are installed, because `verify.sh`
+builds `lambda/` and runs the `lambda/` and `infra/` suites.
+
+**Still owner action before this can go green:** create the read-only IAM role and
+set `AWS_VERIFY_ROLE_ARN`. Grant describe-only — `verify.sh` reads
+continuous-backups, SNS subscriptions and alarm state, and this repository is
+public (`BR-BIZ-E05`).
+
+### FU-EOS-21 · A restored table comes back with PITR `DISABLED`  → surfaced 2026-08-21 · 🟡 P1
+
+Found by the FU-EOS-2 drill. `restore-table-to-point-in-time` does **not** carry the
+source table's continuous-backup setting across:
+`describe-continuous-backups` on the restored table returns
+`PointInTimeRecoveryStatus: DISABLED`.
+
+The failure mode is specific and nasty. PITR only matters on the day you use it — and
+the moment you use it, you are running on a table with no PITR. Recover from a bad
+delete on Monday, point the app at the restored table, hit a second bad delete on
+Friday, and there is nothing to restore from: the 35-day window belongs to a table you
+are no longer using. **The safety net disappears at exactly the moment it has just
+proved it was needed.**
+
+Not fixed here — the drill's remit was to observe, not to change anything. Two parts:
+
+- **Procedure:** `.ai-eos/EMERGENCY.md` must state that re-enabling PITR
+  (`update-continuous-backups --point-in-time-recovery-specification
+  PointInTimeRecoveryEnabled=true`) is a mandatory step of any recovery, not an
+  afterthought.
+- **Infrastructure:** if a restored table is ever promoted to production it has to be
+  adopted into CDK (`infra/`), where `pointInTimeRecovery` is already set — never
+  patched by CLI. That path is currently undocumented.
 
 ## Group B — deferred backlog (feature/infra work, not gating correctness)
 
