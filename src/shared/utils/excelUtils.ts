@@ -411,16 +411,10 @@ const parsePhoneNumber = (raw: unknown): { mobile: string, countryCode: string, 
 
 const formatDate = (dateVal: unknown): string => {
     if (!dateVal) return '';
-    let date: Date;
-    // Firestore Timestamp compatibility: values written before the move off
-    // Firebase can still be a { toDate(): Date } object rather than a string.
-    // Client types these fields as string, so the branch is invisible to the
-    // type system and the casts below are what keep it reachable. Do not remove.
-    if (typeof dateVal === 'object' && dateVal && typeof (dateVal as { toDate?: unknown }).toDate === 'function') {
-        date = (dateVal as { toDate: () => Date }).toDate();
-    } else {
-        date = new Date(dateVal as string | number | Date);
-    }
+    // The Firestore Timestamp ({ toDate(): Date }) branch that used to live here was
+    // removed on 2026-08-07: every pre-AWS record was deleted in the data reset, so
+    // no value reaching this function can be a Timestamp any more.
+    const date = new Date(dateVal as string | number | Date);
     if (isNaN(date.getTime())) return '';
     const day   = date.getDate().toString().padStart(2, '0');
     const month = (date.getMonth() + 1).toString().padStart(2, '0');

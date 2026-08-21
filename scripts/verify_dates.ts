@@ -9,7 +9,7 @@ const SUSPICIOUS_PATTERNS = [
     { regex: /toISOString\(\).split/, message: "Manual ISO formatting detected" }
 ];
 
-const IGNORE_FILES = ['dateUtils.ts', 'excelUtils.ts', 'firebase.ts'];
+const IGNORE_FILES = ['dateUtils.ts', 'excelUtils.ts'];
 
 function scanFile(filePath: string) {
     const content = fs.readFileSync(filePath, 'utf-8');

@@ -1,12 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(cat .firebaserc)",
-      "Bash(grep -i \"emulator\" firebase.json)",
       "Bash(ls *.json)",
-      "Bash(grep -i \"emulator\\\\|EMULATOR\\\\|VITE_USE\" .env.example)",
       "Bash(cat .env.example)",
-      "Bash(firebase emulators:start)",
       "Bash(java -version)",
       "Bash(npx tsc *)",
       "Bash(node -e \"const p=require\\('./package.json'\\); console.log\\(JSON.stringify\\({scripts:p.scripts,devDeps:Object.keys\\(p.devDependencies||{}\\)},null,2\\)\\)\")",

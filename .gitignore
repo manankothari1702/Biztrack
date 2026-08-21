@@ -40,9 +40,10 @@ lint_log.txt
 lint_output.txt
 clients_lint.txt
 output.txt
+
+# Firebase leftovers from the pre-AWS backend. The files and the Firebase project
+# itself were removed on 2026-08-07; these lines stay only so a stray local run of
+# an old firebase CLI cannot re-commit them.
 firebase-debug.log
 firestore-debug.log
-
-# Firebase hosting cache — left over from the pre-AWS backend.
-# NOTE: .firebase/hosting.ZGlzdA.cache is still tracked from that era.
 .firebase/
