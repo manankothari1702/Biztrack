@@ -65,7 +65,30 @@ Biztrack is a comprehensive business management dashboard designed for independe
 
 ## 🧑‍💻 Local development
 
-### The API proxy — why `npm run dev` needs `.env.local`
+### Local development setup
+
+**Copy `.env.development.local.example` to `.env.development.local` before running
+`npm run dev`.**
+
+```bash
+cp .env.development.local.example .env.development.local
+npm run dev
+```
+
+> ⚠️ **Without this file, Vite falls back to production configuration.** Vite layers
+> env files *per key*, and `.env` holds the production values, so any key the local
+> file does not set falls through to production. With no local file at all, `npm run
+> dev` uses the **production Cognito pool and the production API URL**.
+>
+> That is not a harmless misconfiguration. Cognito does not enforce CORS, so sign-up
+> and sign-in would succeed against the production user pool and create a real user
+> there. Only the first API call fails, on CORS from localhost — after the damage,
+> not before it.
+
+The example file is committed and holds the real dev-stack values, so it can be
+copied as-is. `.env.development.local` itself stays gitignored.
+
+### The API proxy — why `npm run dev` needs `.env.development.local`
 
 The deployed API's CORS allowlist trusts **only** the CloudFront origin. That is
 deliberate: security audit **C3** replaced a wildcard `*` with an explicit allowlist.
@@ -85,11 +108,8 @@ the Vite dev server proxies API calls (see `server.proxy` in `vite.config.ts`):
 the browser calls same-origin `/api/*`, Vite forwards it to API Gateway
 server-side, and CORS never applies — no preflight is even sent.
 
-To enable it, create a **`.env.development.local`** in the repo root:
-
-```env
-VITE_API_URL=/api
-```
+That is what `VITE_API_URL=/api` in `.env.development.local` switches on — it is
+already set in the example file you copied above.
 
 > ⚠️ **Use `.env.development.local`, not `.env.local`.** Vite loads `.env.local`
 > in *every* mode, including `vite build` — so `VITE_API_URL=/api` there gets
@@ -98,25 +118,28 @@ VITE_API_URL=/api
 > only in development mode, so `npm run build` still reads the absolute URL from
 > `.env`. Both are gitignored.
 
-Vite layers `.env` → `.env.development` → `.env.development.local` **per key**,
-so Cognito settings still come from `.env`; only the API URL changes locally.
+Vite layers `.env` → `.env.development` → `.env.development.local` **per key**.
+That per-key layering is exactly why the local file must set the Cognito keys too,
+not just the API URL: anything it leaves out falls through to the production values
+in `.env`.
 
-To proxy somewhere other than the default prod API, export
-`VITE_API_PROXY_TARGET` before `npm run dev`.
+To proxy somewhere other than the dev API, change `VITE_API_PROXY_TARGET` in
+`.env.development.local`. `vite.config.ts` reads it with `loadEnv`, so setting it in
+the env file works.
 
 Sign-in needs no special setup: the Cognito app client already registers
 `http://localhost:5173` as a callback/logout URL, so only the API was ever blocked.
 
-### Use a dedicated Cognito dev user
+### Local development runs against the dev stack
 
-Local development runs against the **production** table. Data is partitioned per
-user (`PK = USER#<uid>`, with `uid` taken from the verified token), so signing in
-as a dedicated dev account gives you complete isolation from real data without a
-second table or stack — you cannot read or write another user's rows.
+`BiztrackStack-dev` is deployed and is what local development targets: its own
+table (`biztrack-dev`), its own Cognito pool and its own API. It starts **empty**
+and is never seeded — create whatever records you need by hand.
 
-**Create one, then use it for all local work.** See
-`docs/followups/README.md` → *FU-B6* for why a fully separate dev stack is
-deferred rather than done.
+Sign up through the UI on your first run; the dev pool has no users until you do.
+
+The separate dev stack that `docs/followups/README.md` → *FU-B6* tracked as
+deferred is now built and deployed.
 
 ### Stop the dev server before `cdk deploy` or `cdk diff`
 
