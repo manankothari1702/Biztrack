@@ -8,6 +8,7 @@ import {
     faTasks,
     faUsers,
     faSitemap,
+    faBoxesStacked,
     faSignOutAlt,
     faUserCircle
 } from '@fortawesome/free-solid-svg-icons';
@@ -33,6 +34,7 @@ const Sidebar: React.FC = () => {
         { to: '/calendar', icon: faCalendarAlt, label: 'Calendar' },
         { to: '/tasks', icon: faTasks, label: 'Tasks' },
         { to: '/clients', icon: faUsers, label: 'Follow Ups' },
+        { to: '/inventory', icon: faBoxesStacked, label: 'Inventory' },
         { to: '/team', icon: faSitemap, label: 'My Organization' },
     ];
 

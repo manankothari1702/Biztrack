@@ -1,0 +1,10 @@
+.env
+pgdata/
+backups/
+uploads/
+logs/
+frontend/
+__pycache__/
+*.pyc
+node_modules/
+.venv/

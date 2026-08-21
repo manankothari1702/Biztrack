@@ -1,6 +1,6 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { PutCommand, GetCommand, DeleteCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
-import { db, TABLE, keys } from './lib/db';
+import { db, TABLE, keys, safeId } from './lib/db';
 import { ok, created, noContent, badRequest, notFound, serverError, getUid, resolveCors } from './lib/response';
 import { guardAccount } from './lib/accountGuard';
 import { stripTableKeys } from './lib/sanitize';
@@ -42,8 +42,8 @@ const listTasks = async (uid: string, event: APIGatewayProxyEvent): Promise<APIG
 
     // NEW (audit B1): calendar date-range mode — GSI2 scoped to a dueDate range. Built by
     // a fully independent function (own KeyCondition / Filter / values, from scratch); it
-    // shares NO expression seed with the status/priority branch below (which retains its
-    // pre-existing orphaned-:prefix bug — out of scope here, flagged separately).
+    // shares NO expression seed with the status/priority branch below. That branch carried
+    // an orphaned :prefix binding until it was fixed to seed filterParts the same way.
     if (q.from || q.to) {
         return await listTasksByDateRange(uid, q);
     }
@@ -58,11 +58,15 @@ const listTasks = async (uid: string, event: APIGatewayProxyEvent): Promise<APIG
         ':prefix': 'TASK#',
     };
 
-    const filterParts: string[] = [];
+    const filterParts: string[] = ['begins_with(SK, :prefix)'];
+    let keyCondition = 'PK = :pk';
 
     if (status === 'Overdue') {
         filterParts.push('#status <> :completed');
-        filterParts.push('dueDate < :now');
+        // dueDate is GSI2's sort key, so the bound belongs in the KeyCondition: DynamoDB
+        // rejects a key attribute in a FilterExpression. Same placement as
+        // listTasksByDateRange below. :now stays bound AND referenced.
+        keyCondition = 'PK = :pk AND dueDate < :now';
         exprValues[':completed'] = 'Completed';
         exprValues[':now']       = new Date().toISOString();
     } else if (status) {
@@ -78,8 +82,8 @@ const listTasks = async (uid: string, event: APIGatewayProxyEvent): Promise<APIG
     const result = await db.send(new QueryCommand({
         TableName:                 TABLE,
         IndexName:                 'GSI2-TaskStatus',
-        KeyConditionExpression:    'PK = :pk',
-        FilterExpression:          filterParts.length ? filterParts.join(' AND ') : 'begins_with(SK, :prefix)',
+        KeyConditionExpression:    keyCondition,
+        FilterExpression:          filterParts.join(' AND '),
         ExpressionAttributeValues: exprValues,
         ExpressionAttributeNames:  status ? { '#status': 'status' } : undefined,
         Limit:                     pageSize,
@@ -170,7 +174,15 @@ const addTask = async (uid: string, event: APIGatewayProxyEvent): Promise<APIGat
     const body = stripTableKeys(parseBody<Task>(event));
     if (typeof body.title !== 'string' || !body.title.trim()) return badRequest('title is required');
 
-    const item = { ...body, ...keys.task(uid, body.id) };  // keys MUST win
+    const id = safeId(body.id);  // never key off an unvalidated body.id (FU-EOS-13)
+    // dueDate is GSI2's sort key and the task list queries that index, so a task
+    // without one was invisible in the list (FU-EOS-14). AddTaskModal.tsx:18
+    // already defaults it to today and TaskItem.tsx:93 assumes it exists — this
+    // makes the API agree with the model the app already relies on.
+    const dueDate = typeof body.dueDate === 'string' && body.dueDate.trim()
+        ? body.dueDate
+        : new Date().toISOString();
+    const item = { ...body, ...keys.task(uid, id), id, dueDate };  // keys MUST win
     await db.send(new PutCommand({ TableName: TABLE, Item: item }));
     return created(stripKeys(item));
 };

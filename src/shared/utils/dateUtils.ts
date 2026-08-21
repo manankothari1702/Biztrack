@@ -14,7 +14,7 @@ export const toUtcIso = (date: Date | string): string => {
         if (!isValid(d)) return '';
         // Create UTC date at midnight
         return new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate())).toISOString();
-    } catch (e) {
+    } catch {
         logger.error('Invalid date provided to toUtcIso:', date);
         return '';
     }
@@ -78,7 +78,7 @@ export const formatDisplayDate = (isoString: string, formatStr: string = 'MMM d,
         const date = new Date(isoString);
         if (!isValid(date)) return 'Invalid Date';
         return format(date, formatStr);
-    } catch (e) {
+    } catch {
         return 'Invalid Date';
     }
 };

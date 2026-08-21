@@ -12,7 +12,7 @@ interface ClientFiltersProps {
 }
 
 const ClientFilters: React.FC<ClientFiltersProps> = ({ filterType, setFilterType, searchQuery, setSearchQuery, searchInputRef }) => {
-    const tabs = ['All', 'Prospect', 'User', 'Associate', 'Supervisor'];
+    const tabs: (ClientType | 'All')[] = ['All', 'Prospect', 'User', 'Associate', 'Supervisor'];
 
     return (
         <div className="flex flex-col md:flex-row gap-4 justify-between items-center w-full shadow-sm p-1 rounded-2xl bg-white border border-slate-100">
@@ -21,7 +21,7 @@ const ClientFilters: React.FC<ClientFiltersProps> = ({ filterType, setFilterType
                 {tabs.map((tab) => (
                     <button
                         key={tab}
-                        onClick={() => setFilterType(tab as any)}
+                        onClick={() => setFilterType(tab)}
                         className={`px-4 py-2 rounded-lg text-xs font-bold uppercase tracking-wide transition-all duration-200 whitespace-nowrap font-mono ${filterType === tab
                             ? 'bg-white text-primary shadow-sm ring-1 ring-slate-100'
                             : 'text-slate-500 hover:text-slate-700 hover:bg-slate-100'

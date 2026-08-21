@@ -115,7 +115,7 @@ export interface ValidationResult {
 // IMPORT LOGIC
 // ==========================================
 
-export const parseExcel = async (file: File): Promise<any[]> => {
+export const parseExcel = async (file: File): Promise<Record<string, unknown>[]> => {
     if (file.size > MAX_EXCEL_SIZE_BYTES) {
         throw new Error('File too large. Maximum allowed size is 5 MB.');
     }
@@ -409,14 +409,12 @@ const parsePhoneNumber = (raw: unknown): { mobile: string, countryCode: string, 
     return { mobile, countryCode, isValid: true };
 };
 
-const formatDate = (dateVal: any): string => {
+const formatDate = (dateVal: unknown): string => {
     if (!dateVal) return '';
-    let date: Date;
-    if (typeof dateVal === 'object' && dateVal && typeof dateVal.toDate === 'function') {
-        date = dateVal.toDate();
-    } else {
-        date = new Date(dateVal);
-    }
+    // The Firestore Timestamp ({ toDate(): Date }) branch that used to live here was
+    // removed on 2026-08-07: every pre-AWS record was deleted in the data reset, so
+    // no value reaching this function can be a Timestamp any more.
+    const date = new Date(dateVal as string | number | Date);
     if (isNaN(date.getTime())) return '';
     const day   = date.getDate().toString().padStart(2, '0');
     const month = (date.getMonth() + 1).toString().padStart(2, '0');
@@ -424,7 +422,7 @@ const formatDate = (dateVal: any): string => {
     return `${day}/${month}/${year}`;
 };
 
-const parseFlexibleDate = (value: any): string | null => {
+const parseFlexibleDate = (value: unknown): string | null => {
     if (!value) return null;
     if (typeof value === 'number') {
         const date = new Date(Math.round((value - 25569) * 86400 * 1000));

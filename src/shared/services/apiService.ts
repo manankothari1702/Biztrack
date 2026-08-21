@@ -1,6 +1,23 @@
 import { fetchAuthSession } from 'aws-amplify/auth';
 import { API_URL } from '../lib/aws';
-import type { Client, Task, FlatOrgNode, User, AccountDeletionResponse } from '../types';
+import type {
+    Client, Task, FlatOrgNode, User, AccountDeletionResponse,
+    Product, Batch, StockMovement, WriteOffReason,
+} from '../types';
+import {
+    productParams, batchParams, stockMovementParams, suffix,
+} from './apiParams';
+import type {
+    ProductFilters, BatchFilters, StockMovementFilters,
+} from './apiParams';
+
+// Filter shapes live in ./apiParams so they can be unit-tested without loading
+// Amplify (lib/aws calls Amplify.configure on import). Re-exported here so
+// callers keep importing everything API-shaped from one module.
+export type {
+    ProductFilters, BatchFilters, StockMovementFilters,
+    InventoryFilterState,
+} from './apiParams';
 
 export const PENDING_DELETION_EVENT = 'biztrack:account-pending-deletion';
 
@@ -177,6 +194,130 @@ export const tasksApi = {
 
     delete: (id: string): Promise<void> =>
         request<void>(`tasks/${id}`, { method: 'DELETE' }),
+};
+
+// ── Products ─────────────────────────────────────────────────────────────────
+
+export interface ProductsResponse {
+    products: Product[];
+    nextToken: string | null;
+    count: number;
+}
+
+export interface BatchesResponse {
+    batches: Batch[];
+    nextToken: string | null;
+}
+
+/** Rows that actually persisted, not rows attempted — see the bulk contract. */
+export interface BulkProductsResult {
+    imported: number;   // created
+    updated: number;    // matched an existing stockNo
+    requested: number;
+    failed: number;
+    timedOut: boolean;
+}
+
+export const productsApi = {
+    list: (filters: ProductFilters = {}): Promise<ProductsResponse> =>
+        request<ProductsResponse>(`products${suffix(productParams(filters))}`),
+
+    get: (id: string): Promise<Product> =>
+        request<Product>(`products/${encodeURIComponent(id)}`),
+
+    add: (product: Product): Promise<Product> =>
+        request<Product>('products', { method: 'POST', body: JSON.stringify(product) }),
+
+    // Catalogue fields only. totalQuantity / earliestExpiry / invDate are dropped
+    // server-side and restored from the stored row — a rename can never move stock.
+    update: (product: Product): Promise<Product> =>
+        request<Product>(`products/${encodeURIComponent(product.id)}`, {
+            method: 'PUT', body: JSON.stringify(product),
+        }),
+
+    delete: (id: string): Promise<void> =>
+        request<void>(`products/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+    // Upsert matched on a normalized stockNo. Never touches batches or stock.
+    // Two rows normalizing to one stockNo are rejected with 400 VALIDATION + row index.
+    bulkAdd: (products: Product[]): Promise<BulkProductsResult> =>
+        request<BulkProductsResult>('products/bulk', {
+            method: 'POST', body: JSON.stringify({ products }),
+        }),
+
+    bulkDelete: (ids: string[]): Promise<{ deleted: number; requested: number; timedOut: boolean }> =>
+        request<{ deleted: number; requested: number; timedOut: boolean }>('products/bulk', {
+            method: 'DELETE', body: JSON.stringify({ ids }),
+        }),
+
+    /** One product's batches — the sale batch picker's source. Empty batches hidden by default. */
+    batches: (id: string, includeEmpty = false): Promise<BatchesResponse> => {
+        const params = new URLSearchParams();
+        if (includeEmpty) params.set('includeEmpty', 'true');
+        const qs = params.toString();
+        return request<BatchesResponse>(`products/${encodeURIComponent(id)}/batches${qs ? `?${qs}` : ''}`);
+    },
+};
+
+// ── Batches ──────────────────────────────────────────────────────────────────
+
+export interface AdjustBatchBody {
+    /** ABSOLUTE on-hand count — the server derives the delta. */
+    quantity: number;
+    /** Changing this re-keys the batch: the stock moves rows, merging if the target exists. */
+    expiryDate?: string;
+    note?: string;
+}
+
+export interface WriteOffResult {
+    batch: Batch;
+    writtenOff: number;
+}
+
+// Path params are encoded because these routes carry TWO dynamic segments; an
+// unencoded value containing a slash would silently re-route the request.
+const batchPath = (productId: string, expiry: string): string =>
+    `batches/${encodeURIComponent(productId)}/${encodeURIComponent(expiry)}`;
+
+export const batchesApi = {
+    list: (filters: BatchFilters = {}): Promise<BatchesResponse> =>
+        request<BatchesResponse>(`batches${suffix(batchParams(filters))}`),
+
+    expiring: (days = 30): Promise<BatchesResponse> =>
+        batchesApi.list({ expiringInDays: days }),
+
+    expired: (): Promise<BatchesResponse> =>
+        batchesApi.list({ status: 'expired' }),
+
+    /** Manual correction. Writes an ADJUST movement; may re-key. 409 if the batch moved in flight. */
+    adjust: (productId: string, expiry: string, body: AdjustBatchBody): Promise<Batch> =>
+        request<Batch>(batchPath(productId, expiry), { method: 'PUT', body: JSON.stringify(body) }),
+
+    /** Zeroes the batch and writes a WRITE_OFF movement. 409 BATCH_EMPTY if already zero. */
+    writeOff: (
+        productId: string,
+        expiry: string,
+        reason: WriteOffReason,
+        note?: string,
+    ): Promise<WriteOffResult> =>
+        request<WriteOffResult>(`${batchPath(productId, expiry)}/write-off`, {
+            method: 'POST', body: JSON.stringify({ reason, note }),
+        }),
+};
+
+// ── Stock movements (read-only audit) ────────────────────────────────────────
+//
+// There is no create/update/delete. Movements are written server-side, inside
+// the transaction that moves the batch and the product roll-up.
+
+export interface StockMovementsResponse {
+    movements: StockMovement[];
+    nextToken: string | null;
+}
+
+export const stockApi = {
+    list: (filters: StockMovementFilters = {}): Promise<StockMovementsResponse> =>
+        request<StockMovementsResponse>(`stock-movements${suffix(stockMovementParams(filters))}`),
 };
 
 // ── Dashboard ────────────────────────────────────────────────────────────────

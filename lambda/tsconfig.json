@@ -12,5 +12,9 @@
         "resolveJsonModule": true
     },
     "include": ["src/**/*"],
-    "exclude": ["node_modules", "dist"]
+    // Test files must never reach dist/ — CDK packages this whole directory
+    // (minus src/) into the Lambda asset, and a shipped *.test.js would carry a
+    // require('vitest') that is not a production dependency.
+    // Typecheck them separately: tsc -p tsconfig.test.json
+    "exclude": ["node_modules", "dist", "src/**/*.test.ts"]
 }

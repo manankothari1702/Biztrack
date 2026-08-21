@@ -27,3 +27,34 @@ dist-ssr
 .env
 .env.local
 .env.*.local
+.gstack/
+
+# CDK synth output — ~31 MB of bundled node_modules per synth.
+# Also covered by infra/.gitignore; repeated here so it is visible from the root.
+infra/cdk.out/
+.cdk.staging/
+
+# Lint and debug artefacts — regenerated on demand, never reviewed
+lint_report.json
+lint_log.txt
+lint_output.txt
+clients_lint.txt
+output.txt
+
+# Firebase leftovers from the pre-AWS backend. The files and the Firebase project
+# itself were removed on 2026-08-07; these lines stay only so a stray local run of
+# an old firebase CLI cannot re-commit them.
+firebase-debug.log
+firestore-debug.log
+.firebase/
+
+# EOS pipeline docs and the process-review agents — local only, never committed.
+# Owner's decision, 2026-08-21: these describe the process that reviews the app,
+# not the app. They are not to enter this repo now or in future. The six agents
+# already tracked under .ai-eos/review/agents/ are unaffected.
+.ai-eos/PIPELINE.md
+.ai-eos/APPROVAL.md
+.ai-eos/review/agents/blocker.md
+.ai-eos/review/agents/challenge.md
+.ai-eos/review/agents/finding-validation.md
+.ai-eos/review/agents/operational-validation.md

@@ -198,12 +198,16 @@ const DayDetailsModal: React.FC<DayDetailsModalProps> = ({
             </div>
 
 
-            <RescheduleModal
-                isOpen={rescheduleState.isOpen}
-                onClose={() => setRescheduleState({ ...rescheduleState, isOpen: false })}
-                onConfirm={handleConfirmReschedule}
-                title={`Reschedule ${rescheduleState.type === 'task' ? 'Task' : 'Call'}`}
-            />
+            {/* Mounted only while open, so it picks up a fresh default date each
+                time rather than resetting itself from an effect after first paint. */}
+            {rescheduleState.isOpen && (
+                <RescheduleModal
+                    isOpen={rescheduleState.isOpen}
+                    onClose={() => setRescheduleState({ ...rescheduleState, isOpen: false })}
+                    onConfirm={handleConfirmReschedule}
+                    title={`Reschedule ${rescheduleState.type === 'task' ? 'Task' : 'Call'}`}
+                />
+            )}
         </div>
     );
 };

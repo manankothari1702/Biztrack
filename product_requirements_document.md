@@ -1,5 +1,19 @@
 # Product Requirements Document (PRD) - Biztrack
 
+> ⚠️ **Historical document — the technical sections are out of date.**
+>
+> This PRD was written against the original Firebase implementation. Biztrack now
+> runs entirely on AWS: **Cognito** for auth, **DynamoDB** for data, Lambda, API
+> Gateway and S3/CloudFront. The Firebase project was deleted on 2026-08-07.
+>
+> Every mention below of Firebase Auth, Firestore, Firestore listeners, Firestore
+> Security Rules or Cloud Functions describes the **old** implementation and must
+> not be used as a guide to how the app works today.
+>
+> The *product* requirements — sections 1 to 7 — are still accurate and still the
+> intent. For current architecture, data model and decisions, read
+> [`docs/PROJECT.md`](docs/PROJECT.md), which is the authoritative source.
+
 ## 1. Overview & Objectives
 
 ### 1.1 Purpose of the Application

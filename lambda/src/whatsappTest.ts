@@ -1,17 +1,30 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { GetCommand } from '@aws-sdk/lib-dynamodb';
-import { GetParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
+import {
+    GetSecretValueCommand,
+    ResourceNotFoundException,
+    SecretsManagerClient,
+} from '@aws-sdk/client-secrets-manager';
 import axios from 'axios';
 import { db, TABLE, keys } from './lib/db';
 import { ok, serverError, badRequest, getUid, tooManyRequests, resolveCors } from './lib/response';
 import { guardAccount } from './lib/accountGuard';
 
-const ssm = new SSMClient({ region: process.env.AWS_REGION ?? 'ap-south-1' });
+const secrets = new SecretsManagerClient({ region: process.env.AWS_REGION ?? 'ap-south-1' });
 
-const getSecret = async (name: string): Promise<string> => {
-    const res = await ssm.send(new GetParameterCommand({ Name: name, WithDecryption: true }));
-    return res.Parameter?.Value ?? '';
+// Same secrets, same semantics as whatsappScheduler.ts: an absent secret means the
+// WhatsApp feature is not configured, and that is the ONLY failure swallowed here.
+// AccessDenied, throttling, network and every other SDK error rethrow to the
+// handler's catch and surface as a 500, because those are faults, not "feature off".
+const getSecret = async (id: string): Promise<string> => {
+    try {
+        const res = await secrets.send(new GetSecretValueCommand({ SecretId: id }));
+        return res.SecretString ?? '';
+    } catch (err) {
+        if (err instanceof ResourceNotFoundException) return '';
+        throw err;
+    }
 };
 
 // ── Per-user rate limit for test sends (audit A1) ───────────────────────────
@@ -92,10 +105,15 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (limited) return limited;
 
         const [token, phoneNumberId, profileResult] = await Promise.all([
-            getSecret('/biztrack/whatsapp/token'),
-            getSecret('/biztrack/whatsapp/phone-id'),
+            getSecret('biztrack/whatsapp/token'),
+            getSecret('biztrack/whatsapp/phone-id'),
             db.send(new GetCommand({ TableName: TABLE, Key: keys.profile(uid) })),
         ]);
+
+        // Not configured. The scheduler returns silently; an HTTP endpoint has to say
+        // something, so this reports it as unavailable rather than letting an empty
+        // token reach Meta and surface as an opaque 500.
+        if (!token || !phoneNumberId) return badRequest('WhatsApp is not configured.');
 
         const profile = profileResult.Item;
         if (!profile) return badRequest('Profile not found');

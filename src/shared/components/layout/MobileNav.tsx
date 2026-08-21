@@ -7,6 +7,7 @@ import {
     faTasks,
     faUsers,
     faSitemap,
+    faBoxesStacked,
     faBars,
     faTimes,
     faSignOutAlt,
@@ -27,6 +28,7 @@ const MobileNav: React.FC = () => {
         { to: '/calendar', icon: faCalendarAlt, label: 'Calendar' },
         { to: '/tasks', icon: faTasks, label: 'Tasks' },
         { to: '/clients', icon: faUsers, label: 'Follow Ups' },
+        { to: '/inventory', icon: faBoxesStacked, label: 'Inventory' },
         { to: '/team', icon: faSitemap, label: 'My Team' },
     ];
 

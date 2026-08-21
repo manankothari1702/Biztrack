@@ -77,7 +77,7 @@ const Login: React.FC = () => {
         if (!/[0-9]/.test(password)) { setError('Password must contain at least one number.'); return; }
         // Symbol set = Cognito's EXACT requireSymbols special characters (not "any non-alnum",
         // which would accept unicode/space that Cognito rejects → confusing server rejection).
-        if (!/[$*.^?!@#%&/,><':;|_~`+={}()"\[\]\\-]/.test(password)) { setError('Password must contain at least one symbol (e.g. ! @ # $ % & *).'); return; }
+        if (!/[$*.^?!@#%&/,><':;|_~`+={}()"[\]\\-]/.test(password)) { setError('Password must contain at least one symbol (e.g. ! @ # $ % & *).'); return; }
 
         setLoading(true);
         try {

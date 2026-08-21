@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Installed by new-app.sh:  git config core.hooksPath .githooks
+# Makes the gate the default rather than something remembered.
+#
+# Runs in seconds. If it ever stops being fast, move the slow check to the full
+# tier — do not let people learn to reach for --no-verify.
+exec ./verify.sh --fast

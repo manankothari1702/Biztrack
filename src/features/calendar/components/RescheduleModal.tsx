@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { faTimes, faCalendarAlt } from '@fortawesome/free-solid-svg-icons';
 import { getTodayInput, toInputDate } from '../../../shared/utils/dateUtils';
@@ -12,15 +12,16 @@ interface RescheduleModalProps {
 }
 
 const RescheduleModal: React.FC<RescheduleModalProps> = ({ isOpen, onClose, onConfirm, initialDate, title = 'Reschedule' }) => {
-    const [date, setDate] = useState('');
-
-    useEffect(() => {
-        if (isOpen) {
-            const tomorrow = new Date();
-            tomorrow.setDate(tomorrow.getDate() + 1);
-            setDate(initialDate || toInputDate(tomorrow.toISOString()));
-        }
-    }, [isOpen, initialDate]);
+    // The parent mounts this only while it is open, so the default is computed
+    // once on mount rather than written back by an effect after the first render.
+    // That effect was the react-hooks/set-state-in-effect finding, and it also
+    // meant the first painted frame showed the wrong date.
+    const [date, setDate] = useState(() => {
+        if (initialDate) return initialDate;
+        const tomorrow = new Date();
+        tomorrow.setDate(tomorrow.getDate() + 1);
+        return toInputDate(tomorrow.toISOString());
+    });
 
     if (!isOpen) return null;
 
