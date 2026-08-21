@@ -47,3 +47,14 @@ output.txt
 firebase-debug.log
 firestore-debug.log
 .firebase/
+
+# EOS pipeline docs and the process-review agents — local only, never committed.
+# Owner's decision, 2026-08-21: these describe the process that reviews the app,
+# not the app. They are not to enter this repo now or in future. The six agents
+# already tracked under .ai-eos/review/agents/ are unaffected.
+.ai-eos/PIPELINE.md
+.ai-eos/APPROVAL.md
+.ai-eos/review/agents/blocker.md
+.ai-eos/review/agents/challenge.md
+.ai-eos/review/agents/finding-validation.md
+.ai-eos/review/agents/operational-validation.md
