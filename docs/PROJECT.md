@@ -238,4 +238,4 @@ see — the highest-risk, lowest-value change available (`MIGRATION.md`).
 | Backup frequency and location | Continuous — DynamoDB PITR, 35-day window, same region |
 | Retention period | Indefinite while the account is `ACTIVE`. `PENDING_DELETION` accounts are purged by a daily Lambda |
 | What happens on termination | Account marked `PENDING_DELETION`, blocked from all endpoints, then purged |
-| Restore last tested on | 🔴 **NEVER** — an unrestored backup is a file, not a safety net. Tracked as FU-EOS-2 |
+| Restore last tested on | 2026-08-21 — `biztrack` restored via PITR to `biztrack-restore-test` in **4m31s** (±15s, the poll interval); all 6 GSIs came back `ACTIVE`; scratch table dropped. **Caveat:** the source table held 0 items, so this proved the mechanism, not data fidelity. Fidelity was proved separately the same day on `biztrack-dev` — 14/14 items restored, keys well-formed. Restored tables come back with **PITR `DISABLED`** (FU-EOS-21) |
